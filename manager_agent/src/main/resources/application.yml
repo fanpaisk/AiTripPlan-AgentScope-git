@@ -1,0 +1,95 @@
+server:
+  port: 8081
+  # Agent 跑一次可能要几分钟，别让 Tomcat 提前掐断连接
+  tomcat:
+    connection-timeout: 120s
+
+spring:
+  application:
+    name: manager-agent
+  # 把 commons 里的 .env 读进来（可选：文件不存在也不报错）
+  # 真实环境变量的优先级高于 .env，线上直接用环境变量覆盖即可
+  config:
+    import: optional:classpath:.env[.properties]
+  mvc:
+    async:
+      request-timeout: 30m
+  jackson:
+    default-property-inclusion: non_null
+
+app:
+  agentscope:
+    # ★ 语言模型配置（厂商中立）：改这三行就能换厂商，代码零改动
+    #   百炼兼容模式 / DeepSeek 官方 / Kimi / 智谱 / SiliconFlow / 本地 vLLM、Ollama 都适用
+    llm:
+      # 在 commons/src/main/resources/.env 里配置，或设置同名环境变量
+      api-key: ${LLM_API_KEY:${ALIBABA_DASHCOPE_KEY:}}
+      # 协议：openai-compatible（推荐，换厂商都用它）| dashscope（百炼原生协议）
+      provider: ${LLM_PROVIDER:openai-compatible}
+      model: ${LLM_MODEL:qwen3-max}
+      # base-url 留空 = 用百炼兼容模式默认地址；换 DeepSeek 填 https://api.deepseek.com
+      base-url: ${LLM_BASE_URL:}
+      stream: true
+      enable-search: false
+    nacos:
+      server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
+    # ★ 观测：把 AgentScope 的 LLM/工具/Agent 调用以 OTel span 上报到 Langfuse
+    #   Key 放在 commons/src/main/resources/.env；没填 Key 时只告警不报错，业务照常。
+    #   注意 endpoint 必须是【完整】的 traces 地址，OtlpHttpSpanExporter 不会自己补 /v1/traces。
+    tracing:
+      enabled: ${LANGFUSE_TRACING_ENABLED:true}
+      endpoint: ${LANGFUSE_OTLP_ENDPOINT:https://cloud.langfuse.com/api/public/otel/v1/traces}
+      public-key: ${LANGFUSE_PUBLIC_KEY:}
+      secret-key: ${LANGFUSE_SECRET_KEY:}
+    # ★ 三个超时的层次关系（必须遵守，否则超时提示会失真）：
+    #   remote-call-timeout（主管 Agent 主动放弃单个子 Agent）
+    #     < tool-execution-timeout（框架兜底，应更大）
+    #       < run-timeout（整次请求的总时长）
+    remote-call-timeout: 15m
+    tool-execution-timeout: 17m
+    run-timeout: 45m
+    max-iters: 25
+    # ★ 同一轮里的多个工具调用是否并行执行
+    #   AgentScope 默认 false（Flux.concat 串行），开启后走 Flux.mergeSequential：
+    #   同时订阅所有工具，总耗时 ≈ 最慢那个，而不是相加。
+    #   前提：这些工具之间没有数据依赖。
+    tool-parallel: true
+    # 单个子 Agent 返回内容的最大字符数，防止撑爆主管 Agent 上下文
+    remote-result-max-chars: 8000
+
+  manager:
+    name: ManagerAgent
+    description: 主管Agent：把用户的旅行需求拆解为子任务，并调度远程专业Agent完成
+    # HTTP 场景必须 false：true 时 Agent 会停下来等控制台输入，请求会一直挂住
+    need-user-confirm: false
+    max-subtasks: 6
+    max-iters: 25
+    # ★ 远程子 Agent 清单：加一个子 Agent = 加一段配置 + 启动对应服务，不用改代码
+    remote-agents:
+      - name: RouteMakingAgent
+        description: 擅长自驾游路线制定，可调用百度地图MCP查询真实距离、驾车耗时、途经点与路况
+        task-description: 需要制定路线/交通方案的自驾游子任务，请写清出发地、目的地、出发日期与天数
+      - name: TripPlannerAgent
+        description: 擅长景点行程规划，可推荐景点、查询天气、给出住宿与美食建议
+        task-description: 需要规划每日行程的子任务，请写清目的地、日期、天数、人数与预算偏好
+
+# ============ Nacos A2A 注册中心 / 发现中心 ============
+# manager 只做「发现方」：去 Nacos 找远程 Agent；自己不作为 A2A 服务端注册
+agentscope:
+  a2a:
+    server:
+      enabled: false
+    nacos:
+      server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
+      registry:
+        enabled: false
+      discovery:
+        enabled: true
+
+logging:
+  level:
+    root: info
+    managerAgent: info
+    io.agentscope: info
+    # Nacos 心跳日志很吵，需要排查时再打开
+    com.alibaba.nacos: warn

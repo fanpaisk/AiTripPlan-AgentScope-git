@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <parent>
+        <artifactId>AiTripPlan</artifactId>
+        <groupId>com.imooc</groupId>
+        <version>1.0-SNAPSHOT</version>
+    </parent>
+    <modelVersion>4.0.0</modelVersion>
+
+    <artifactId>commons</artifactId>
+    <name>commons</name>
+    <description>公共模块：配置属性、模型工厂、Nacos 客户端、Agent/工具工具类</description>
+
+    <!--
+      注意：commons 是一个普通 jar，被其它三个模块依赖，不要在这里引入
+      spring-boot-maven-plugin 的 repackage，否则会打成一个不可依赖的 fat jar。
+    -->
+
+    <properties>
+        <!--
+          OpenTelemetry：AgentScope 的 TelemetryTracer 内部会自己 new
+          OtlpHttpSpanExporter + BatchSpanProcessor + SdkTracerProvider
+          （见 TelemetryTracer$Builder 的字节码），所以【必须】补上 SDK 与 OTLP exporter，
+          只引 opentelemetry-api 会在 build() 时报 NoClassDefFoundError。
+          版本选 1.55.0：与本地仓库里已有的 opentelemetry-bom 一致。
+        -->
+        <opentelemetry.version>1.55.0</opentelemetry.version>
+
+        <!--
+          OpenTelemetry 的 Reactor 插桩：AgentScope 是全响应式（Mono/Flux）的，
+          TelemetryTracer 要跨响应式链传递 span 上下文，用的是
+            io.opentelemetry.instrumentation.reactor.v3_1.ContextPropagationOperator
+          的 storeOpenTelemetryContext / getOpenTelemetryContextFromContextView 两个静态方法。
+          缺这个依赖的表现：服务能正常启动（类是按需加载的），但【第一次请求】就 500，
+          日志里是 NoClassDefFoundError —— 很容易被误判成"Langfuse 密钥不对"。
+
+          版本要单独写：Spring Boot 4.0.2 只管理 opentelemetry-bom(1.55.0)，
+          不管 instrumentation 这一套（它们是独立发版的，且带 -alpha 后缀）。
+
+          ★ 2.21.0-alpha 是【精确对齐】的版本：它声明依赖 opentelemetry-api 1.55.0，
+            正好等于 Spring Boot 4.0.2 管理的版本。
+            不要随手升到最新（2.32.0-alpha 要求 api 1.66.0，差 11 个小版本，
+            运行期可能 NoSuchMethodError）；也别降（2.20.0-alpha 要求 1.54.0）。
+            想升级时必须同时把 opentelemetry-bom 一起升到对应的 api 版本。
+        -->
+        <opentelemetry.instrumentation.version>2.21.0-alpha</opentelemetry.instrumentation.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>io.opentelemetry</groupId>
+                <artifactId>opentelemetry-bom</artifactId>
+                <version>${opentelemetry.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <!-- 观测链路（Langfuse）用；默认关闭，只有 app.agentscope.tracing.enabled=true 才生效 -->
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-sdk</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-exporter-otlp</artifactId>
+        </dependency>
+        <!-- 跨 Reactor 链传递 trace 上下文（缺它第一次请求就 500，见上面的说明） -->
+        <dependency>
+            <groupId>io.opentelemetry.instrumentation</groupId>
+            <artifactId>opentelemetry-reactor-3.1</artifactId>
+            <version>${opentelemetry.instrumentation.version}</version>
+        </dependency>
+    </dependencies>
+
+</project>

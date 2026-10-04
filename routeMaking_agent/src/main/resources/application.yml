@@ -1,0 +1,77 @@
+server:
+  port: 8082
+  # 单机学习场景：固定成回环地址，保证注册到 Nacos 的 AgentCard URL 一定能被主管 Agent 访问到。
+  # 如果以后要把 Agent 部署到别的机器，改成真实内网 IP（或删掉这一行让框架自动探测）。
+  address: 127.0.0.1
+
+spring:
+  application:
+    name: route-making-agent
+  # A2A 服务端是 SSE 长连接，Agent 跑一轮要好几分钟。
+  # 不配这一项就会用 Tomcat 默认的 30 秒 async 超时，长任务跑到一半连接被掐断，
+  # 客户端只看到 "EOF reached while reading"，完全看不出真实原因。
+  mvc:
+    async:
+      request-timeout: 30m
+  config:
+    import: optional:classpath:.env[.properties]
+
+app:
+  agentscope:
+    # ★ 语言模型配置（厂商中立）：改这三行就能换厂商，代码零改动
+    llm:
+      api-key: ${LLM_API_KEY:${ALIBABA_DASHCOPE_KEY:}}
+      provider: ${LLM_PROVIDER:openai-compatible}
+      model: ${LLM_MODEL:qwen3-max}
+      base-url: ${LLM_BASE_URL:}
+      stream: true
+    nacos:
+      server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
+    # ★ 观测：把 AgentScope 的 LLM/工具/Agent 调用以 OTel span 上报到 Langfuse
+    #   Key 放在 commons/src/main/resources/.env；没填 Key 时只告警不报错，业务照常。
+    tracing:
+      enabled: ${LANGFUSE_TRACING_ENABLED:true}
+      endpoint: ${LANGFUSE_OTLP_ENDPOINT:https://cloud.langfuse.com/api/public/otel/v1/traces}
+      public-key: ${LANGFUSE_PUBLIC_KEY:}
+      secret-key: ${LANGFUSE_SECRET_KEY:}
+    max-iters: 5
+    tool-execution-timeout: 12m
+
+  baidu-map:
+    # 百度地图 MCP Server 的 SSE 地址，在 commons/src/main/resources/.env 中配置
+    mcp-sse-url: ${BAIDU_MAP_MCP_SSE_URL:}
+    request-timeout: 120s
+    initialization-timeout: 60s
+
+# ============ A2A 协议服务端 + Nacos 注册 ============
+# card.name 必须和主管 Agent 配置里的 app.manager.remote-agents[].name 完全一致，
+# 否则主管 Agent 在 Nacos 里按名字找不到这个 Agent。
+agentscope:
+  a2a:
+    server:
+      enabled: true
+      # ★ 关键配置：任务完成时把 Agent 的最终回答作为 Message 一并返回。
+      #   框架默认是 false，此时 A2A 任务只以"完成"状态结束、不带任何文本，
+      #   主管 Agent 的 RemoteAgentTool 就会永远拿到空字符串（表现为"子 Agent 没返回内容"）。
+      complete-with-message: true
+      # 单次 Agent 执行超时（秒）。应【大于】主管 Agent 的 remote-call-timeout（默认 5m），
+      # 否则主管放弃之后子 Agent 还在空跑，白白烧额度。
+      agent-completion-timeout-seconds: 1200
+      card:
+        name: RouteMakingAgent
+        description: 擅长处理自驾游路线制定（基于百度地图MCP的真实距离、耗时与路况）
+        version: 1.0.0
+    nacos:
+      server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
+      registry:
+        enabled: true
+        register-as-latest: true
+      discovery:
+        enabled: false
+
+logging:
+  level:
+    root: info
+    routeMakingAgent: info
+    io.agentscope: info
+    com.alibaba.nacos: warn

@@ -1,0 +1,317 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "AiTripPlan - 路线制定Agent (RouteMakingAgent)",
+    "version": "1.0.0",
+    "description": "路线制定 Agent，运行在 **8082** 端口。\n\n自身是一个标准 **A2A 协议服务端**，内部挂载**百度地图 MCP Server（SSE 传输）**提供的工具（地理编码、驾车路线规划、距离耗时、路况、周边 POI 等）。\n\n> ⚠️ 百度地图 MCP 地址没配或已失效时，本 Agent 仍能正常启动并被主管 Agent 调用，只是无法给出真实的距离/耗时数据（会明确说明「该数据未能获取」）。\n\n> 调试 A2A 接口时，请求体里的 `kind` 字段是**必填**的，缺了会返回 `-32602 Invalid parameters`。"
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8082",
+      "description": "本地开发环境 - 路线制定Agent"
+    }
+  ],
+  "tags": [
+    {
+      "name": "01. Agent 卡片",
+      "description": "A2A 协议标准接口，主管 Agent 靠它发现本服务能力"
+    },
+    {
+      "name": "02. A2A 调用",
+      "description": "直接调用本 Agent（JSON-RPC 2.0），用于单点调试百度地图 MCP 链路"
+    }
+  ],
+  "paths": {
+    "/.well-known/agent-card.json": {
+      "get": {
+        "tags": ["01. Agent 卡片"],
+        "summary": "获取 AgentCard（能力声明）",
+        "description": "A2A 协议标准发现接口。返回本 Agent 的名称、能力描述与 A2A 地址。\n\n**排查点**：`name` 必须与主管 Agent 配置 `app.manager.remote-agents[0].name`（默认 `RouteMakingAgent`）完全一致，否则主管 Agent 在 Nacos 里找不到它。",
+        "operationId": "getRouteMakingAgentCard",
+        "responses": {
+          "200": {
+            "description": "AgentCard",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentCard"
+                },
+                "examples": {
+                  "示例": {
+                    "value": {
+                      "name": "RouteMakingAgent",
+                      "description": "擅长处理自驾游路线制定（基于百度地图MCP的真实距离、耗时与路况）",
+                      "url": "http://127.0.0.1:8082",
+                      "version": "1.0.0",
+                      "protocolVersion": "0.3.0",
+                      "preferredTransport": "JSONRPC",
+                      "capabilities": {
+                        "streaming": true
+                      },
+                      "defaultInputModes": ["text"],
+                      "defaultOutputModes": ["text"],
+                      "skills": []
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/": {
+      "post": {
+        "tags": ["02. A2A 调用"],
+        "summary": "A2A 调用：message/send（验证百度地图 MCP）",
+        "description": "直接给路线 Agent 派一个自驾路线任务。\n\n**这条请求最常用的两个用途**：\n1. 验证百度地图 MCP 是否真的通了 —— 通了才会返回真实的公里数与耗时\n2. 验证 Agent 能不能正确选择并调用 MCP 工具\n\n返回文本里出现具体里程/耗时 = MCP 正常；出现「该数据未能获取」= MCP 地址没配或已失效，去检查 `.env` 里的 `BAIDU_MAP_MCP_SSE_URL`。",
+        "operationId": "routeMakingA2aSendMessage",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonRpcSendMessageRequest"
+              },
+              "examples": {
+                "深圳到惠州自驾路线": {
+                  "summary": "课程主用例：深圳→惠州自驾路线",
+                  "value": {
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "method": "message/send",
+                    "params": {
+                      "message": {
+                        "kind": "message",
+                        "role": "user",
+                        "messageId": "m-1",
+                        "parts": [
+                          {
+                            "kind": "text",
+                            "text": "帮我规划深圳到惠州的自驾路线，给出总里程、预计耗时、主要高速和途经点"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                },
+                "验证地图工具": {
+                  "summary": "单点验证：地理编码 + 距离",
+                  "value": {
+                    "jsonrpc": "2.0",
+                    "id": "2",
+                    "method": "message/send",
+                    "params": {
+                      "message": {
+                        "kind": "message",
+                        "role": "user",
+                        "messageId": "m-2",
+                        "parts": [
+                          {
+                            "kind": "text",
+                            "text": "查一下惠州西湖风景名胜区的地理位置，以及从深圳市民中心开车过去要多久、多少公里"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON-RPC 响应（成功或错误都在 200 里）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonRpcResponse"
+                },
+                "examples": {
+                  "成功": {
+                    "value": {
+                      "jsonrpc": "2.0",
+                      "id": "1",
+                      "result": {
+                        "kind": "message",
+                        "role": "agent",
+                        "messageId": "9f2c1a30-1111-2222-3333-444455556666",
+                        "contextId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                        "taskId": "12345678-1234-1234-1234-123456789012",
+                        "parts": [
+                          {
+                            "kind": "text",
+                            "text": "### 总体路线\n深圳市民中心 → 惠州西湖，全程约 95 公里，预计 1 小时 40 分钟……"
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "报文缺kind（-32602）": {
+                    "value": {
+                      "jsonrpc": "2.0",
+                      "id": "1",
+                      "error": {
+                        "code": -32602,
+                        "message": "Invalid parameters"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AgentCard": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "必须与主管 Agent 配置的 app.manager.remote-agents[].name 一致"
+          },
+          "description": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "protocolVersion": {
+            "type": "string"
+          },
+          "preferredTransport": {
+            "type": "string",
+            "example": "JSONRPC"
+          },
+          "capabilities": {
+            "type": "object"
+          },
+          "defaultInputModes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "defaultOutputModes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "JsonRpcSendMessageRequest": {
+        "type": "object",
+        "required": ["jsonrpc", "id", "method", "params"],
+        "properties": {
+          "jsonrpc": {
+            "type": "string",
+            "enum": ["2.0"],
+            "example": "2.0"
+          },
+          "id": {
+            "type": "string",
+            "example": "1"
+          },
+          "method": {
+            "type": "string",
+            "enum": ["message/send", "message/stream"],
+            "example": "message/send"
+          },
+          "params": {
+            "type": "object",
+            "required": ["message"],
+            "properties": {
+              "message": {
+                "$ref": "#/components/schemas/A2aMessage"
+              }
+            }
+          }
+        }
+      },
+      "A2aMessage": {
+        "type": "object",
+        "required": ["kind", "role", "messageId", "parts"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "★ 必填，固定为 message（漏了会返回 -32602）",
+            "enum": ["message"],
+            "example": "message"
+          },
+          "role": {
+            "type": "string",
+            "enum": ["user", "agent"],
+            "example": "user"
+          },
+          "messageId": {
+            "type": "string",
+            "example": "m-1"
+          },
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/A2aPart"
+            }
+          }
+        }
+      },
+      "A2aPart": {
+        "type": "object",
+        "required": ["kind", "text"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["text"],
+            "example": "text"
+          },
+          "text": {
+            "type": "string",
+            "example": "帮我规划深圳到惠州的自驾路线"
+          }
+        }
+      },
+      "JsonRpcResponse": {
+        "type": "object",
+        "properties": {
+          "jsonrpc": {
+            "type": "string",
+            "example": "2.0"
+          },
+          "id": {
+            "type": "string",
+            "example": "1"
+          },
+          "result": {
+            "$ref": "#/components/schemas/A2aMessage"
+          },
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "integer"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <parent>
+        <artifactId>AiTripPlan</artifactId>
+        <groupId>com.imooc</groupId>
+        <version>1.0-SNAPSHOT</version>
+    </parent>
+    <modelVersion>4.0.0</modelVersion>
+
+    <artifactId>tripPlanner_agent</artifactId>
+    <name>tripPlanner_agent</name>
+    <description>行程规划 Agent：挂载 Skills 与子 Agent，以 A2A 协议对外提供服务</description>
+
+    <dependencies>
+        <!--    公共模块    -->
+        <dependency>
+            <groupId>com.imooc</groupId>
+            <artifactId>commons</artifactId>
+        </dependency>
+
+        <!--   以 SpringBoot 方式添加 A2A 依赖（自动装配 AgentScopeA2aServer）    -->
+        <dependency>
+            <groupId>io.agentscope</groupId>
+            <artifactId>agentscope-a2a-spring-boot-starter</artifactId>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <mainClass>tripPlannerAgent.TripPlannerAgentApplication</mainClass>
+                </configuration>
+                <executions>
+                    <!-- 打可执行 jar：java -jar target/tripPlanner_agent-1.0-SNAPSHOT.jar -->
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>

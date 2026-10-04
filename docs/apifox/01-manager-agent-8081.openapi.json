@@ -1,0 +1,616 @@
+﻿{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "AiTripPlan - 主管Agent (ManagerAgent)",
+    "version": "1.0.0",
+    "description": "多 Agent + Skills + AgentScope(A2A/Nacos) 自主决策旅游规划智能体 —— 用户统一入口。\n\n本服务运行在 **8081** 端口，负责接收用户 Prompt、自主拆解任务、通过 A2A 协议调度远程子 Agent，并汇总输出完整行程。\n\n> 导入方式：Apifox → 项目设置 → 导入数据 → OpenAPI/Swagger → 选择本文件。\n> 导入后直接使用，无需再配置前置 URL（已写入 server）。"
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8081",
+      "description": "本地开发环境 - 主管Agent"
+    }
+  ],
+  "tags": [
+    {
+      "name": "01. 业务入口",
+      "description": "用户提交旅游规划需求的接口"
+    },
+    {
+      "name": "02. 可观测",
+      "description": "Agent 编排过程的自检与运行轨迹查询，排查问题首选"
+    },
+    {
+      "name": "03. 配置自检",
+      "description": "把实际生效的配置打出来（厂商中立：baseUrl + 模型名 + Key 掩码），用于定位模型相关的报错"
+    }
+  ],
+  "paths": {
+    "/app": {
+      "post": {
+        "tags": ["01. 业务入口"],
+        "summary": "同步规划行程（等完整结果）",
+        "description": "提交旅游需求，ManagerAgent 会：\n1. 用 PlanNotebook 自主拆解任务\n2. 通过 A2A 调用远程子 Agent（RouteMakingAgent / TripPlannerAgent）\n3. 汇总输出完整行程\n\n**注意**：整条链路可能耗时 1~5 分钟（取决于子 Agent 数量与模型速度），Apifox 默认超时不够，请在「设置 → 请求超时时间」调到 **300 秒以上**。\n\n响应里的 `steps` 是本次运行的推理/工具调用轨迹。",
+        "operationId": "planTripSync",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              },
+              "examples": {
+                "course-01-深圳到惠州三日游": {
+                  "summary": "课程用例①：完整行程规划（推荐）",
+                  "value": {
+                    "prompt": "帮我制定2026年元旦，深圳到惠州3日游自驾游计划，请包含吃住行、天气、酒店、餐饮美食。"
+                  }
+                },
+                "course-02-只调路线Agent": {
+                  "summary": "课程用例②：指定调用路线智能体",
+                  "value": {
+                    "prompt": "调用路线智能体，帮我规划深圳到惠州的自驾路线"
+                  }
+                },
+                "course-03-点名调用两个Agent": {
+                  "summary": "课程用例③：明确要求调度两个子 Agent",
+                  "value": {
+                    "prompt": "帮我制定2026年元旦，深圳到惠州3日游自驾游计划，请包含吃住行、天气、酒店、餐饮美食。\n\n你可以调用以下Agent处理子任务：\n- routeMaking Agent: 擅长处理自驾游路线制定\n- tripPlanner Agent: 擅长处理景点行程规划\n- 每个子任务要注明调用的Agent"
+                  }
+                },
+                "selfcheck-一句话": {
+                  "summary": "自检用：最短链路（先验证服务通不通）",
+                  "value": {
+                    "prompt": "你好，请用一句话说明你现在可以调度的子 Agent 有哪些。"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "执行完成（注意：业务失败也是 200，请以 status 字段判断）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatResponse"
+                },
+                "examples": {
+                  "成功": {
+                    "value": {
+                      "runId": "a1b2c3d4e5f60001",
+                      "status": "SUCCESS",
+                      "answer": "## 行程总览\n深圳 → 惠州 3 日自驾游 ...（Markdown 正文）",
+                      "durationMillis": 87321,
+                      "steps": [
+                        {
+                          "type": "HINT",
+                          "name": "PreReasoning",
+                          "detail": "帮我制定2026年元旦，深圳到惠州3日游自驾游计划……",
+                          "atMillis": 1767225600000,
+                          "durationMillis": 0
+                        },
+                        {
+                          "type": "REASONING",
+                          "name": "ManagerAgent",
+                          "detail": "我先拆解任务：①路线 ②景点行程 ③预算……",
+                          "atMillis": 1767225601200,
+                          "durationMillis": 0
+                        },
+                        {
+                          "type": "TOOL_CALL",
+                          "name": "callRouteMakingAgent",
+                          "detail": "{task=制定深圳到惠州3日自驾路线……}",
+                          "atMillis": 1767225603400,
+                          "durationMillis": 0
+                        },
+                        {
+                          "type": "TOOL_RESULT",
+                          "name": "callRouteMakingAgent",
+                          "detail": "由 RouteMakingAgent 完成：深圳→惠州约 90 公里……",
+                          "atMillis": 1767225631200,
+                          "durationMillis": 0
+                        }
+                      ]
+                    }
+                  },
+                  "模型Key无效": {
+                    "value": {
+                      "runId": "a1b2c3d4e5f60002",
+                      "status": "FAILED",
+                      "answer": "",
+                      "error": "HTTP request failed with status 401 | {\"code\":\"InvalidApiKey\"...}",
+                      "durationMillis": 12108,
+                      "steps": []
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "请求体缺失或格式错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "prompt为空": {
+                    "value": {
+                      "timestamp": "2026-01-01T10:00:00.000+08:00",
+                      "status": 500,
+                      "error": "Internal Server Error",
+                      "path": "/app"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/app/stream": {
+      "post": {
+        "tags": ["01. 业务入口"],
+        "summary": "流式规划行程（SSE，推荐前端联调）",
+        "description": "以 Server-Sent Events 边推理边推送，适合做「打字机」效果。\n\n**Apifox 使用方式**：新建请求 → 请求类型选择 **SSE**（或 Body 选 raw JSON，Header 加 `Accept: text/event-stream`）→ 发送后可看到事件逐条到达。\n\n事件类型：\n- `chunk`：推理过程 / 工具调用分片，`type` 为 REASONING、TOOL_RESULT、HINT、AGENT_RESULT 等\n- `done`：全部结束，`text` 为最终完整回答，`durationMillis` 为总耗时\n- `error`：执行异常",
+        "operationId": "planTripStream",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              },
+              "examples": {
+                "流式-深圳到惠州": {
+                  "value": {
+                    "prompt": "帮我制定2026年元旦，深圳到惠州3日游自驾游计划，请包含吃住行、天气、酒店、餐饮美食。"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "SSE 事件流",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                },
+                "examples": {
+                  "事件流示例": {
+                    "value": "event:chunk\ndata:{\"runId\":\"018ab6fcf8ae4df9\",\"type\":\"REASONING\",\"text\":\"我先拆解任务……\",\"last\":false}\n\nevent:chunk\ndata:{\"runId\":\"018ab6fcf8ae4df9\",\"type\":\"TOOL_RESULT\",\"text\":\"由 RouteMakingAgent 完成……\",\"last\":false}\n\nevent:done\ndata:{\"runId\":\"018ab6fcf8ae4df9\",\"type\":\"DONE\",\"text\":\"<完整 Markdown 方案>\",\"last\":true,\"durationMillis\":91234}\n\n"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents": {
+      "get": {
+        "tags": ["02. 可观测"],
+        "summary": "查看远程子 Agent 注册情况【排查第一步】",
+        "description": "返回配置中声明的每个远程 Agent 在 Nacos 上的注册状态。\n\n**任何「子 Agent 没结果 / 调用失败」的问题，先调这个接口**：\n- `registered: true` —— 已注册，`url` 是它的 A2A 地址\n- `registered: false` —— 看 `error` 字段，通常是「未启动」「没注册到 Nacos」或「Nacos 连不上」",
+        "operationId": "listRemoteAgents",
+        "responses": {
+          "200": {
+            "description": "子 Agent 列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RemoteAgentView"
+                  }
+                },
+                "examples": {
+                  "全部正常": {
+                    "value": [
+                      {
+                        "name": "RouteMakingAgent",
+                        "toolName": "callRouteMakingAgent",
+                        "description": "擅长处理自驾游路线制定（基于百度地图MCP的真实距离、耗时与路况）",
+                        "registered": true,
+                        "url": "http://127.0.0.1:8082",
+                        "version": "1.0.0"
+                      },
+                      {
+                        "name": "TripPlannerAgent",
+                        "toolName": "callTripPlannerAgent",
+                        "description": "擅长处理景点行程规划（景点推荐、天气、住宿、美食与预算）",
+                        "registered": true,
+                        "url": "http://127.0.0.1:8085",
+                        "version": "1.0.0"
+                      }
+                    ]
+                  },
+                  "子Agent没起来": {
+                    "value": [
+                      {
+                        "name": "RouteMakingAgent",
+                        "toolName": "callRouteMakingAgent",
+                        "description": "擅长处理自驾游路线制定",
+                        "registered": false,
+                        "error": "Nacos 中未找到该 Agent 卡片"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/health": {
+      "get": {
+        "tags": ["02. 可观测"],
+        "summary": "健康检查",
+        "description": "返回服务状态与已注册的子 Agent 数量，用于快速判断「主管 Agent 和 Nacos 是否都正常」。",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "服务状态",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "UP"
+                    },
+                    "service": {
+                      "type": "string",
+                      "example": "manager-agent"
+                    },
+                    "registeredAgents": {
+                      "type": "integer",
+                      "description": "成功从 Nacos 找到卡片的子 Agent 数量，正常应为 2",
+                      "example": 2
+                    }
+                  }
+                },
+                "examples": {
+                  "正常": {
+                    "value": {
+                      "status": "UP",
+                      "service": "manager-agent",
+                      "registeredAgents": 2
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/diagnose": {
+      "get": {
+        "tags": ["03. 配置自检"],
+        "summary": "配置自检（查模型名 / Key / 端点是否匹配）【报错时先调这个】",
+        "description": "把**实际生效**的配置原样打出来。\n\n为什么需要它：配置是「`.env` → 系统环境变量 → `application.yml` 默认值」多层覆盖的，\n出问题时很难确认最终到底用了哪个值，靠猜会浪费大量时间。\n\n`deep=true` 时会额外真实调用一次大模型（**会消耗少量 token**），把原始报错原样带回。\n\n**典型用法**：`/app` 报 `url error` / `InvalidApiKey` / `Model not exist` 时，先用这个接口看 `effectiveModelName` 到底是什么。",
+        "operationId": "diagnose",
+        "parameters": [
+          {
+            "name": "deep",
+            "in": "query",
+            "required": false,
+            "description": "是否额外做一次真实的大模型调用（消耗少量额度）",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "example": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "生效配置与自检结论",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                },
+                "examples": {
+                  "只看配置": {
+                    "value": {
+                      "llm": {
+                        "effectiveModelName": "qwen3-max",
+                        "effectiveEndpoint": "https://api.deepseek.com/chat/completions",
+                        "baseUrl": "(未设置，使用官方默认 https://dashscope.aliyuncs.com)",
+                        "apiKeyMasked": "sk-1234****AbCd (长度 35)",
+                        "stream": true,
+                        "enableSearch": false,
+                        "enableThinking": null
+                      },
+                      "nacos": {
+                        "serverAddr": "127.0.0.1:8848"
+                      },
+                      "maxIters": 25,
+                      "remoteCallTimeout": "PT5M",
+                      "remoteAgents": [
+                        {
+                          "name": "RouteMakingAgent",
+                          "toolName": "callRouteMakingAgent",
+                          "registered": true,
+                          "url": "http://127.0.0.1:8082",
+                          "version": "1.0.0"
+                        }
+                      ],
+                      "hints": []
+                    }
+                  },
+                  "深度自检失败示例": {
+                    "value": {
+                      "llm": {
+                        "effectiveModelName": "deepseek-v4-flash",
+                        "effectiveEndpoint": "https://api.deepseek.com/chat/completions"
+                      },
+                      "hints": [
+                        "模型名看起来是多模态模型，但会走到纯文本端点，DashScope 会返回 url error"
+                      ],
+                      "deepCheck": {
+                        "ok": false,
+                        "error": "DashScope API error: url error, please check url！",
+                        "elapsedMillis": 288
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs": {
+      "get": {
+        "tags": ["02. 可观测"],
+        "summary": "最近运行轨迹列表",
+        "description": "返回最近 N 次运行的轨迹（内存中保留最近 200 条）。用于回顾每次请求的耗时与状态。",
+        "operationId": "listRuns",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "返回条数，1~200，默认 20",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "minimum": 1,
+              "maximum": 200
+            },
+            "example": 20
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "轨迹列表（按时间倒序）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RunTrace"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/{runId}": {
+      "get": {
+        "tags": ["02. 可观测"],
+        "summary": "某次运行的完整轨迹",
+        "description": "根据 `/app` 响应里的 `runId` 查询完整过程。\n\n**用途**：无需看服务端日志，就能还原「模型怎么想的、调了哪些工具、每个子 Agent 返回了什么」。面试演示时非常好用。",
+        "operationId": "getRun",
+        "parameters": [
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "description": "运行ID，来自 /app 响应",
+            "schema": {
+              "type": "string"
+            },
+            "example": "a1b2c3d4e5f60001"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "运行轨迹",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunTrace"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "runId 不存在（服务已重启，或超过 200 条被淘汰）"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ChatRequest": {
+        "type": "object",
+        "required": ["prompt"],
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "用户的自然语言旅游规划需求",
+            "example": "帮我制定2026年元旦，深圳到惠州3日游自驾游计划，请包含吃住行、天气、酒店、餐饮美食。"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "会话标识（预留字段，当前每次请求独立运行，后续扩展多轮对话时使用）",
+            "example": "default"
+          }
+        }
+      },
+      "ChatResponse": {
+        "type": "object",
+        "properties": {
+          "runId": {
+            "type": "string",
+            "description": "本次运行ID，可用于查询 /api/runs/{runId}"
+          },
+          "status": {
+            "type": "string",
+            "description": "SUCCESS / FAILED / RUNNING",
+            "enum": ["SUCCESS", "FAILED", "RUNNING"]
+          },
+          "answer": {
+            "type": "string",
+            "description": "最终行程方案（Markdown）"
+          },
+          "error": {
+            "type": "string",
+            "description": "失败原因，成功时为空"
+          },
+          "durationMillis": {
+            "type": "integer",
+            "description": "总耗时（毫秒）"
+          },
+          "steps": {
+            "type": "array",
+            "description": "推理与工具调用轨迹",
+            "items": {
+              "$ref": "#/components/schemas/RunStep"
+            }
+          }
+        }
+      },
+      "RunTrace": {
+        "type": "object",
+        "properties": {
+          "runId": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "startedAt": {
+            "type": "integer",
+            "description": "开始时间戳（毫秒）"
+          },
+          "finishedAt": {
+            "type": "integer",
+            "description": "结束时间戳（毫秒），未结束时为 0"
+          },
+          "durationMillis": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["SUCCESS", "FAILED", "RUNNING"]
+          },
+          "answer": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RunStep"
+            }
+          }
+        }
+      },
+      "RunStep": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "REASONING=模型思考 / TOOL_CALL=准备调工具 / TOOL_RESULT=工具返回 / HINT=系统提示或错误",
+            "enum": ["REASONING", "TOOL_CALL", "TOOL_RESULT", "HINT"]
+          },
+          "name": {
+            "type": "string",
+            "description": "Agent 名或工具名"
+          },
+          "detail": {
+            "type": "string",
+            "description": "步骤内容（超过 800 字会截断）"
+          },
+          "atMillis": {
+            "type": "integer"
+          },
+          "durationMillis": {
+            "type": "integer"
+          }
+        }
+      },
+      "RemoteAgentView": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Nacos 中注册的 AgentCard 名称"
+          },
+          "toolName": {
+            "type": "string",
+            "description": "暴露给大模型的工具名"
+          },
+          "description": {
+            "type": "string"
+          },
+          "registered": {
+            "type": "boolean",
+            "description": "是否已在 Nacos 找到该 Agent"
+          },
+          "url": {
+            "type": "string",
+            "description": "A2A 服务地址"
+          },
+          "version": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string",
+            "description": "registered=false 时的原因"
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "timestamp": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "error": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,30 @@
+# 统一行尾处理，避免 Windows/Linux 协作者之间产生整文件级的换行符噪音 diff
+* text=auto
+
+# Windows 脚本保持 CRLF（PowerShell / cmd 在 Windows 上的惯例）
+*.ps1   text eol=crlf
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+
+# 其余文本统一 LF
+*.java  text eol=lf
+*.md    text eol=lf
+*.xml   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+*.sh    text eol=lf
+*.py    text eol=lf
+*.properties text eol=lf
+
+# 二进制文件不做换行符转换
+*.jar   binary
+*.png   binary
+*.jpg   binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+
+# 让 GitHub 语言统计不把文档/配置算进去
+docs/** linguist-documentation
+*.openapi.json linguist-documentation

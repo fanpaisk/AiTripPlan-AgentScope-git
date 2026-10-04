@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.imooc</groupId>
+    <artifactId>AiTripPlan</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+    <name>AiTripPlan</name>
+    <description>多 Agent + Skills + AgentScope(A2A/Nacos) 自主决策旅游规划智能体</description>
+
+    <modules>
+        <!--   公共模块：模型工厂、Nacos 客户端、工具/Agent 工具类    -->
+        <module>commons</module>
+        <!--   主管Agent 负责整体执行计划的制定与远程Agent调度    -->
+        <module>manager_agent</module>
+        <!--   路线制定Agent（挂载百度地图 MCP，以 A2A 对外暴露）    -->
+        <module>routeMaking_agent</module>
+        <!--   行程规划Agent（挂载 Skills + 子Agent，以 A2A 对外暴露）    -->
+        <module>tripPlanner_agent</module>
+    </modules>
+
+    <properties>
+        <!--
+          Java 17：与课程一致。
+          注意：这里刻意【不再使用 enable-preview 编译开关】。
+          preview 编译出来的 class 必须带 preview 参数才能运行，
+          在 IDEA、mvn spring-boot:run、java -jar 三种方式下都要额外加 VM 参数，极易踩坑。
+          本项目代码不使用任何预览特性，因此 JDK 17 / 21 / 25 都能直接编译+运行。
+        -->
+        <java.version>17</java.version>
+        <maven.compiler.release>${java.version}</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+        <!--  Spring Boot 4      -->
+        <spring-boot.version>4.0.2</spring-boot.version>
+        <!--   AgentScope      -->
+        <AgentScope.version>1.0.8</AgentScope.version>
+        <logback.version>1.5.25</logback.version>
+
+        <maven-compiler-plugin.version>3.14.0</maven-compiler-plugin.version>
+        <spring-boot-maven-plugin.version>${spring-boot.version}</spring-boot-maven-plugin.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring-boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
+            <dependency>
+                <groupId>io.agentscope</groupId>
+                <artifactId>agentscope-spring-boot-starter</artifactId>
+                <version>${AgentScope.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>io.agentscope</groupId>
+                <artifactId>agentscope-a2a-spring-boot-starter</artifactId>
+                <version>${AgentScope.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>io.agentscope</groupId>
+                <artifactId>agentscope-nacos-spring-boot-starter</artifactId>
+                <version>${AgentScope.version}</version>
+            </dependency>
+
+            <!--   公共模块    -->
+            <dependency>
+                <groupId>com.imooc</groupId>
+                <artifactId>commons</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <!--   AgentScope 和 SpringBoot 的集成     -->
+        <dependency>
+            <groupId>io.agentscope</groupId>
+            <artifactId>agentscope-spring-boot-starter</artifactId>
+        </dependency>
+
+        <!--   实现slf4j接口，不然日志打印不出来    -->
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+            <version>${logback.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!--
+          Nacos 作为 A2A 注册中心 / 发现中心。
+          引入后 agentscope.a2a.nacos.* 自动生效（框架的 AgentScopeA2aNacosAutoConfiguration）。
+        -->
+        <dependency>
+            <groupId>io.agentscope</groupId>
+            <artifactId>agentscope-nacos-spring-boot-starter</artifactId>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>${maven-compiler-plugin.version}</version>
+                    <configuration>
+                        <release>${maven.compiler.release}</release>
+                        <encoding>UTF-8</encoding>
+                        <compilerArgs>
+                            <!--
+                              -parameters 必须保留：
+                              AgentScope 的 @Tool 方法通过反射读取真实参数名来生成工具的 JSON Schema，
+                              没有这个参数名会变成 arg0/arg1，大模型就无法正确调用工具。
+                            -->
+                            <arg>-parameters</arg>
+                        </compilerArgs>
+                    </configuration>
+                </plugin>
+
+                <plugin>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-maven-plugin</artifactId>
+                    <version>${spring-boot-maven-plugin.version}</version>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+
+</project>

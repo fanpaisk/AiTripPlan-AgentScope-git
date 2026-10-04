@@ -1,0 +1,345 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "AiTripPlan - 行程规划Agent (TripPlannerAgent)",
+    "version": "1.0.0",
+    "description": "行程规划 Agent，运行在 **8085** 端口。\n\n自身是一个标准 **A2A 协议服务端**：\n- 被主管 Agent 通过 Nacos 发现并远程调用（业务主链路）\n- 也可以在这里直接单独调试，不经过主管 Agent（排查子 Agent 问题的最快方式）\n\n内部结构：`TripPlannerAgent` → SubAgentTool → `SuggestSightAgent`（挂载 Skills：Suggest-Sights / Make-A-Table，工具：Calculate）\n\n> 调试 A2A 接口时，请求体里的 `kind` 字段是**必填**的，缺了会返回 `-32602 Invalid parameters`。"
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8085",
+      "description": "本地开发环境 - 行程规划Agent"
+    }
+  ],
+  "tags": [
+    {
+      "name": "01. Agent 卡片",
+      "description": "A2A 协议标准接口，主管 Agent 靠它发现本服务能力"
+    },
+    {
+      "name": "02. A2A 调用",
+      "description": "直接调用本 Agent（JSON-RPC 2.0），用于单点调试"
+    }
+  ],
+  "paths": {
+    "/.well-known/agent-card.json": {
+      "get": {
+        "tags": ["01. Agent 卡片"],
+        "summary": "获取 AgentCard（能力声明）",
+        "description": "A2A 协议标准发现接口。主管 Agent 通过 Nacos 拿到这个卡片后，才知道本 Agent 的名称、能力描述和调用地址。\n\n**排查点**：如果这个接口打不开，说明本模块的 `agentscope-a2a-spring-boot-starter` 依赖缺失，或者容器里没有 `ReActAgent` 类型的 Bean。",
+        "operationId": "getTripPlannerAgentCard",
+        "responses": {
+          "200": {
+            "description": "AgentCard",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentCard"
+                },
+                "examples": {
+                  "示例": {
+                    "value": {
+                      "name": "TripPlannerAgent",
+                      "description": "擅长处理景点行程规划（景点推荐、天气、住宿、美食与预算）",
+                      "url": "http://127.0.0.1:8085",
+                      "version": "1.0.0",
+                      "protocolVersion": "0.3.0",
+                      "preferredTransport": "JSONRPC",
+                      "capabilities": {
+                        "streaming": true
+                      },
+                      "defaultInputModes": ["text"],
+                      "defaultOutputModes": ["text"],
+                      "skills": []
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/": {
+      "post": {
+        "tags": ["02. A2A 调用"],
+        "summary": "A2A 调用：message/send（直接调试本 Agent）",
+        "description": "A2A 协议的 JSON-RPC 2.0 接口。**这是主管 Agent 调用子 Agent 时实际走的链路**，用它可以直接验证「子 Agent 单独是否正常」。\n\n请求体注意两点：\n1. `message.kind` 必须是 `\"message\"`（必填，漏了报 -32602）\n2. `parts[].kind` 是 `\"text\"`\n\n非流式返回：`result` 里是一条 agent 角色的 Message；出错时返回 `error` 对象。\n\n> 想看流式版本可以把 `method` 改成 `message/stream`，返回 SSE。",
+        "operationId": "tripPlannerA2aSendMessage",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonRpcSendMessageRequest"
+              },
+              "examples": {
+                "推荐景点": {
+                  "summary": "让行程规划 Agent 推荐景点",
+                  "value": {
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "method": "message/send",
+                    "params": {
+                      "message": {
+                        "kind": "message",
+                        "role": "user",
+                        "messageId": "m-1",
+                        "parts": [
+                          {
+                            "kind": "text",
+                            "text": "推荐惠州适合元旦去的景点，并给出美食与住宿建议"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                },
+                "验证Skills": {
+                  "summary": "验证 Skills 是否被加载",
+                  "value": {
+                    "jsonrpc": "2.0",
+                    "id": "2",
+                    "method": "message/send",
+                    "params": {
+                      "message": {
+                        "kind": "message",
+                        "role": "user",
+                        "messageId": "m-2",
+                        "parts": [
+                          {
+                            "kind": "text",
+                            "text": "你有哪些技能？请列出可用的 Skill 名称。"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON-RPC 响应（成功或错误都在 200 里）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonRpcResponse"
+                },
+                "examples": {
+                  "成功": {
+                    "value": {
+                      "jsonrpc": "2.0",
+                      "id": "1",
+                      "result": {
+                        "kind": "message",
+                        "role": "agent",
+                        "messageId": "6c896da1-b5b8-4084-bc07-2cb827c539b8",
+                        "contextId": "be2bdbc9-e7f2-4067-9e13-27756c5ad26d",
+                        "taskId": "50db482c-8039-4a22-81f4-2d112980aba1",
+                        "parts": [
+                          {
+                            "kind": "text",
+                            "text": "### 推荐景点\n1. 惠州西湖……"
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "报文缺kind（-32602）": {
+                    "value": {
+                      "jsonrpc": "2.0",
+                      "id": "1",
+                      "error": {
+                        "code": -32602,
+                        "message": "Invalid parameters"
+                      }
+                    }
+                  },
+                  "模型Key无效": {
+                    "value": {
+                      "jsonrpc": "2.0",
+                      "id": "1",
+                      "result": {
+                        "kind": "message",
+                        "role": "agent",
+                        "parts": [
+                          {
+                            "kind": "text",
+                            "text": "Agent execution failed: HTTP 401 InvalidApiKey"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AgentCard": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "必须与主管 Agent 配置的 app.manager.remote-agents[].name 一致"
+          },
+          "description": {
+            "type": "string",
+            "description": "能力描述，主管 Agent 靠它决定是否派活"
+          },
+          "url": {
+            "type": "string",
+            "description": "A2A 服务地址"
+          },
+          "version": {
+            "type": "string"
+          },
+          "protocolVersion": {
+            "type": "string"
+          },
+          "preferredTransport": {
+            "type": "string",
+            "example": "JSONRPC"
+          },
+          "capabilities": {
+            "type": "object"
+          },
+          "defaultInputModes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "defaultOutputModes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "JsonRpcSendMessageRequest": {
+        "type": "object",
+        "required": ["jsonrpc", "id", "method", "params"],
+        "properties": {
+          "jsonrpc": {
+            "type": "string",
+            "enum": ["2.0"],
+            "example": "2.0"
+          },
+          "id": {
+            "type": "string",
+            "example": "1"
+          },
+          "method": {
+            "type": "string",
+            "description": "message/send（非流式）或 message/stream（流式 SSE）",
+            "enum": ["message/send", "message/stream"],
+            "example": "message/send"
+          },
+          "params": {
+            "type": "object",
+            "required": ["message"],
+            "properties": {
+              "message": {
+                "$ref": "#/components/schemas/A2aMessage"
+              }
+            }
+          }
+        }
+      },
+      "A2aMessage": {
+        "type": "object",
+        "required": ["kind", "role", "messageId", "parts"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "★ 必填，固定为 message（漏了会返回 -32602）",
+            "enum": ["message"],
+            "example": "message"
+          },
+          "role": {
+            "type": "string",
+            "enum": ["user", "agent"],
+            "example": "user"
+          },
+          "messageId": {
+            "type": "string",
+            "description": "消息唯一ID，自己生成即可",
+            "example": "m-1"
+          },
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/A2aPart"
+            }
+          },
+          "contextId": {
+            "type": "string",
+            "description": "上下文ID，多轮对话时带上上一次的 contextId 可保持上下文"
+          },
+          "taskId": {
+            "type": "string"
+          }
+        }
+      },
+      "A2aPart": {
+        "type": "object",
+        "required": ["kind", "text"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["text"],
+            "example": "text"
+          },
+          "text": {
+            "type": "string",
+            "example": "推荐惠州适合元旦去的景点"
+          }
+        }
+      },
+      "JsonRpcResponse": {
+        "type": "object",
+        "properties": {
+          "jsonrpc": {
+            "type": "string",
+            "example": "2.0"
+          },
+          "id": {
+            "type": "string",
+            "example": "1"
+          },
+          "result": {
+            "$ref": "#/components/schemas/A2aMessage"
+          },
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "integer",
+                "description": "-32602 参数错误；-32601 方法不存在；-32603 内部错误"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
