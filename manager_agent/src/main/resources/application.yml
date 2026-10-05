@@ -41,6 +41,17 @@ app:
       endpoint: ${LANGFUSE_OTLP_ENDPOINT:https://cloud.langfuse.com/api/public/otel/v1/traces}
       public-key: ${LANGFUSE_PUBLIC_KEY:}
       secret-key: ${LANGFUSE_SECRET_KEY:}
+    # ★ 上下文预算（EXP-002）：EXP-001 实测单 Agent 每次调用平均携带 19 万输入 token，
+    #   九成以上是「只进不出」的工具结果。这里做两件事：
+    #     1) 工具结果外置：超长返回存进 run 级仓库，上下文只留摘要 + id，需要时用 read_artifact 取回
+    #     2) 上下文计量：每次 LLM 调用打印真实 token 与构成（schema 占比 vs 历史占比）
+    #   enabled=false 可一键回到引入本功能前的行为，用于消融对照。
+    context:
+      enabled: true
+      offload-threshold-chars: 4000
+      preview-chars: 800
+      retrieve-chars: 4000
+      meter-enabled: true
     # ★ 三个超时的层次关系（必须遵守，否则超时提示会失真）：
     #   remote-call-timeout（主管 Agent 主动放弃单个子 Agent）
     #     < tool-execution-timeout（框架兜底，应更大）
@@ -57,6 +68,14 @@ app:
     # 单个子 Agent 返回内容的最大字符数，防止撑爆主管 Agent 上下文
     remote-result-max-chars: 8000
 
+  # ★ 百度地图 MCP：单 Agent 对照实验臂需要直接持有地图工具（与 routeMaking_agent 共用
+  #   commons 里的 mcp.BaiduMapMCP 同一份实现）。多 Agent 模式下主管不调用它，
+  #   该 Bean 是懒加载的，因此不会产生任何连接开销。
+  baidu-map:
+    mcp-sse-url: ${BAIDU_MAP_MCP_SSE_URL:}
+    request-timeout: 120s
+    initialization-timeout: 60s
+
   manager:
     name: ManagerAgent
     description: 主管Agent：把用户的旅行需求拆解为子任务，并调度远程专业Agent完成
@@ -64,6 +83,11 @@ app:
     need-user-confirm: false
     max-subtasks: 6
     max-iters: 25
+    # ★ 运行模式：multi = 主管 + 远程子 Agent（现状默认）；single = 单 Agent 自己做完（EXP-001 对照实验臂）
+    #   可被请求体的 mode 字段逐次覆盖 —— 两条臂在同一个 JVM 里切换，避免 JIT 预热差异污染延迟对比。
+    mode: multi
+    # 单 Agent 模式的迭代上限（给得更宽）：目的是让两条臂都【不触顶】，否则比的是预算而不是架构
+    single-max-iters: 40
     # ★ 远程子 Agent 清单：加一个子 Agent = 加一段配置 + 启动对应服务，不用改代码
     remote-agents:
       - name: RouteMakingAgent

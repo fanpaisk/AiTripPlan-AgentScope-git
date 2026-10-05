@@ -170,11 +170,156 @@
 
 ---
 
+## D-017 直连 OTLP 上报必须带 `x-langfuse-ingestion-version: 4`
+
+- **背景**：T1 接入 Langfuse Cloud 后核对官方 OTLP 文档，发现一条我们**没做**的事。
+- **决定**：`AgentScopeTracing` 的 `OtlpHttpSpanExporter` 增加 `x-langfuse-ingestion-version: 4` 请求头。
+- **理由**：官方原文是「直接摄入的 OpenTelemetry 数据**可能延迟最多 15 分钟**」——直连 OTLP 而不带这个头时，数据走旧数据模型，新数据模型的实时通路不生效。后果极其隐蔽：**跑完 `POST /app` 立刻去看 Tracing 列表，可能什么都没有**，于是误判成「T1 失败 / Key 不对」，而其实数据 15 分钟后才到。这类「假失败」比真失败更贵，因为它会把人引向错误的排查方向。
+- **被否**：不加（省掉一个头，换来一个必然踩到的误判陷阱）。
+- **验证**：编译产物里可查到该字符串（`findstr /C:"x-langfuse-ingestion-version" commons\target\classes\config\AgentScopeTracing.class`）；端到端上传后 observation 在一分钟内即可查询到。
+
+---
+
+## D-018 Langfuse 的读取与验收口径：用 v2 API；并用 Metrics API 查 token
+
+- **背景**：T1 首次验收时，`GET /api/public/v2/observations` 返回的 18 条 GENERATION 里 **`modelId` / `inputPrice` / `totalPrice` 全为空**，据此我得出「token 账目缺失」的结论，并花了数轮去追根因。
+- **结论：那个结论是错的**，错在**查询姿势**，不在链路。真实情况由两条证据共同确认：
+  1. 用「保存报文」的采集器抓下应用发出的 OTLP 原始报文，protobuf 里明文出现 `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens`，且按 wire type 判读为 **int_value**（键后字节 `12 02 18 1F` = int 31、`12 02 18 27` = int 39），与 `ChatResponse` 的 `inputTokens:31 / outputTokens:39` 精确吻合；`gen_ai.request.model` = `deepseek-v4-flash`、`gen_ai.operation.name` = `chat`。
+  2. 改查 **Metrics API v2** 立刻拿到 token：`{"data":[{"sum_totalTokens":"85063","sum_inputTokens":"72203","sum_outputTokens":"12860","count_count":"56"}]}`，按模型维度归到 `providedModelName=deepseek-v4-flash`。
+- **决定**：
+  1. **读取口径定为 v2**：trace/span 用 `GET /api/public/v2/observations?fromStartTime=…`，**token / 成本用 `GET /api/public/v2/metrics?query={…}`**（`measure` 取 `totalTokens` / `inputTokens` / `outputTokens` / `count`）。
+  2. **旧接口一律不用**：`GET /api/public/traces` 与 `GET /api/public/observations` 在 Cloud 上返回 **410 Gone**（不是 404），`/api/public/v2/traces` 是 404，单条详情接口不存在（`/api/public/v2/observations/{id}` = 404）。
+  3. **`modelId` / `inputPrice` 为空不代表没数据**：`modelId` 指向项目里的模型定义记录，未匹配到就为空；价格为空是因为 Langfuse 的定价表里没有 `deepseek-v4-flash`。token 账目与这些字段无关。
+- **被否**：
+  - *看到列表里没有 usage 字段就判定「链路没打通」*（就是本次踩的坑：把「接口不返回」当成「数据不存在」）；
+  - *改用 `/api/public/traces` 之类的旧接口去凑*（已 410，方向错误）。
+- **代价 / 教训**：**可观测性问题的第一嫌疑应该是自己的查询口径，而不是被测链路**。判据要选「能直接证明量存在」的那一个（token 总量），而不是「看起来应该带这个字段」的那一个。
+- **被证伪的假设（一并记录，避免重复走）**：一度怀疑「AgentScope 流式路径拿不到 usage」，于是把三处 `stream: true` 改成 `${LLM_STREAM:true}` 并在 `.env` 设 `false` 重打包实测 —— **token 账目在 `stream=true` 与 `stream=false` 两种模式下都正常**（`stream=true` 那次 216s 的 E2E 贡献了 85,063 tokens 中的 85,063−140 部分；`stream=false` 窗口只有 140）。因此该改动**已全部回退**，仓库回到 `stream: true`。
+  - 附带查明：DeepSeek 的流式响应**最后一个 chunk 本来就带完整 `usage`**（`prompt_tokens`/`completion_tokens`/`total_tokens`），紧跟 `[DONE]`；AgentScope 也确有 `OpenAIStreamOptions`（含 `include_usage`）与 `GenerateOptions.additionalBodyParams` 可用。**这条链路本来就是好的。**
+
+---
+
+## D-019 重建顺序：先停、再打包、后启动（jar 文件锁 + 脚本不会停旧进程）
+
+- **背景**：改完 `.env` 与代码后直接 `mvn clean package`，构建失败：`Failed to delete …\manager_agent\target\manager_agent-1.0-SNAPSHOT.jar`。
+- **决定**：把顺序固化为 **`.\stop-all.ps1` → `mvn … clean package` → `.\run-all.ps1 -SkipBuild`**，并写进 `AGENTS.md` 硬约束与常用命令。
+- **理由**：① Windows 不允许删除已被 JVM 加载的 jar，服务在跑时 `clean` 必然失败；② 更危险的是**反向的**坑 —— `run-all.ps1` **没有任何"先停旧进程"的逻辑**（它只 `Start-Process` 新 jar），端口被旧进程占用时新进程会启动失败，**而脚本因为"端口有监听"照样打印 `[就绪]`**。于是人以为重启成功，实际对外服务的是旧代码，之后所有验收结论都建立在错误的构建上。
+- **被否**：*用 `-SkipBuild` 单独重启*（这会跳过打包，`.env` 与代码改动根本没进 jar —— 正是本项目硬约束 7 要防的事）。
+- **附带说明**：`stop-all.ps1` 是按端口 `Stop-Process -Force` 强杀，**不会触发 Spring 的 `DisposableBean.destroy()`**，因此 D-013 里那个「停机前 `forceFlush()`」在这些场景下不会执行。实测无碍（`BatchSpanProcessor` 约 5 秒一批会自然刷出），但**验收 T1 时不要在请求刚结束就杀服务**，否则最后几秒的 span 可能丢失。
+- **验证**：按该顺序重建，5 个模块 `BUILD SUCCESS`（见 `STATUS.md` 第一节 #1）。
+
+---
+
+## D-020 排查时用**环境变量覆盖** `.env`，而不是改 `.env`
+
+- **背景**：需要把 OTLP 端点临时指向本地接收器，以抓取 span 的原始属性。项目原有做法（`tools/otlp-sink.ps1` 的注释、`STATUS.md` 旧第五节）是**改 `.env` → 重新打包 → 重启 → 验完再改回并重新打包**，并专门写了「⚠️ 破坏性验证的恢复步骤」。
+- **决定**：改用**真实环境变量覆盖**：在启动该服务的会话里设 `$env:LANGFUSE_OTLP_ENDPOINT=…` 再 `java -jar`，`.env` 一个字都不动。
+- **理由**：`spring.config.import: optional:classpath:.env[.properties]` 导入的属性源**优先级低于操作系统环境变量**，所以覆盖生效；而好处是全方位的 —— ① 不必重新打包（省一轮构建）；② 不存在"忘记改回来"的残留状态（原做法最大的风险就是中断在中间，服务持续往本地接收器发数据）；③ `.env` 里含密钥，本就该少碰。
+- **证据**：以环境变量启动主管服务后，启动日志打印 `endpoint = http://127.0.0.1:4319/api/public/otel/v1/traces`，证明覆盖确实生效。
+- **附带产出**：`tools/otlp-capture.ps1`（与 `otlp-sink.ps1` 同构，但把报文落盘）。`otlp-sink.ps1` 只回答「发出去了没有」，**回答不了「带着哪些属性」**；而 D-018 那个坑正是"必须有后者"才能定论。落盘后 protobuf 的字段名是明文 ASCII，直接 grep 即可判读，不需要写解析器。
+- **被否**：*继续沿用「改 `.env` + 恢复步骤」*（多一轮构建、且留一个"忘记恢复"的隐患）；*写一个完整的 OTLP protobuf 解析器*（为了看清属性名而引入依赖，成本远高于 grep 明文）。
+
+---
+
+## D-021 观测数据有摄取延迟：token 账目必须事后重采，不能运行刚结束就读
+
+- **背景**：EXP-001 跑批脚本最初在每次运行结束后等 25 秒就查 Langfuse 的 token 账目，用来给每轮打标签。
+- **踩到的坑（实测）**：同一个时间窗口，**运行后 25 秒**读到 `176,298 tokens / 24 obs`；**沉淀后重查**是 `401,962 tokens / 42 obs` —— **低估 2.3 倍**。
+- **决定**：
+  1. 逐轮即时查询的值只当**临时值**；
+  2. **权威值一律以 `tools\experiment-run.ps1 -Recollect` 的事后重采为准**（该模式不跑请求、只重查 Langfuse 并原地更新 `raw/*.json` 与 `results.csv`）；
+  3. 默认即时等待时间从 25 秒提到 90 秒（只为减少临时值的偏差，不代表够用）；
+  4. 报告里引用的 token 数字必须来自重采后的 `results.csv`。
+- **理由**：子 Agent 是**独立 JVM**，跨服务的 span 摄取明显慢于主管自身。而**两条臂涉及的服务数量不同**（多 Agent 臂有 2 个子 Agent，单 Agent 臂没有），低估幅度也不一样 —— 若不修，**两条臂会被系统性偏置，结论可能直接被做反**（当时算出来的比值是 1.6×，真值是 2.2×）。
+- **被否**：*把等待时间无限加大*（跑批时间不可控，且仍不能保证够）；*改用 traceId 聚合*（A2A 不传递 trace 上下文，一次请求会产生多条 trace，做不到 —— 见 D-018）；*改用 Langfuse 的 session 维度*（需要把 runId 贯穿 A2A 消息元数据，属于更大的改造，列为 design.md 的可选增强）。
+- **附带教训**：**"读数时机"本身是测量方法的一部分。** 只要指标是异步汇聚的，就必须区分"临时值"和"权威值"，并显式规定哪个进报告。
+
+---
+
+## D-022 用推理模型当评审：`max_tokens` 给少了会静默返回空正文
+
+- **背景**：EXP-001 的盲评脚本调用 `deepseek-v4-flash` 按 5 维 rubric 打分，要求只输出 JSON。
+- **踩到的坑（实测）**：最初设 `max_tokens = 900`，结果 `finish_reason = length`、`completion_tokens_details.reasoning_tokens = 900`、**`content` 为空**（推理内容 2990 字把预算吃光）。脚本把"解析不到 JSON"当成缺项跳过，于是 6 组里有 4 组被**静默记成 0 分**，汇总出来的"两臂均分 7.58 / 6.5"完全是废数据。
+- **决定**：
+  1. 评审调用 `max_tokens` 给到 **4000**（实测一次完整评审：prompt 4,398 + reasoning 1,067 + JSON 202，`finish_reason=stop`）；
+  2. 脚本**遇到空 `content` 必须抛错**，并在异常里带上 `finish_reason` 与 `reasoning_tokens`；
+  3. 每组统计**成功评分次数**，低于重复数要显式告警，全部失败要标红 —— 不允许把"没有分数"混同于"分数为 0"。
+- **理由**：**推理模型把 `max_tokens` 分成"推理预算 + 正文预算"两部分**，这与非推理模型的行为完全不同。少给预算的表现不是报错，而是"正文为空"——一个看起来像"模型没按要求输出"的假象。
+- **被否**：*换非推理模型*（手上只有这一个模型，且这是已知局限要如实声明）；*不加 JSON 模式、靠正则从推理内容里抠分数*（评分不可靠，且会奖励"推理里写得好看"的答案）。
+- **附带教训**：**"缺数据"和"数据是 0"必须在代码里区分开。** 静默默认值是聚合类脚本最危险的行为 —— 它会产出一份格式完全正常、结论完全错误的报告。
+
+---
+
+## D-023 上下文预算：把「工具结果外置 + 按需取回 + 计量」做成产品能力
+
+- **背景**：EXP-001 实测单 Agent 平均每次 LLM 调用携带约 19 万输入 token，端到端是单 Agent 贵 2.2 倍。补上计量器后（见下），逐次曲线给出了根因的**具体形态**：
+  ```
+  call#1–#4   输入  5,041 → 8,133
+  call#5      输入  167,976   ← 一条地图返回（约 16 万 token）进入上下文
+  call#6–#9   输入  ~21.5 万/次 ← 之后每一次调用都要重发它
+  ```
+  也就是说：**不是"工具太多"，也不是"结果均匀累积"，而是少数几条超大结果长期驻留、每次调用重复付费。**
+- **决定**（四个可独立开关的机制，本次先做 B+D）：
+  1. **B 工具结果外置**：装饰 `McpClientWrapper`，超过阈值（默认 4000 字符）的工具返回存进 **run 级** artifact store，
+     上下文里只留摘要 + id；配套三个取回工具（`list_artifacts` / `read_artifact` / `read_artifact_range`）。
+  2. **D 上下文计量**：装饰 `Model`，每次调用打印**真实**输入/输出 token（取自厂商 usage）+ 消息字符数 + 工具 schema 字符数 + 估算构成。
+  3. 两者都做成**配置 + 请求级开关**（`app.agentscope.context.*` / 请求体 `contextBudget`），
+     这样"开着"与"关着"能在**同一个 JVM 内交错运行** —— 否则两次运行之间要改配置重启，时间漂移会与机制效果混在一起。
+  4. 默认开启，`enabled=false` 一键回到引入前行为。
+- **理由 —— 为什么用装饰器**：MCP 工具是运行时动态注册的（`Toolkit.registerMcpClient`），逐个包装工具会与框架内部实现耦合；
+  而 `McpClientWrapper` 的 `callTool` / `listTools` / `initialize` / `close` 都是公开抽象方法，代理它只依赖稳定接口，就能拦到**所有** MCP 返回。
+  `Model` 更简单，只有 `stream` / `getModelName` 两个方法。
+- **理由 —— 为什么是 run 级 store**：跨运行共享会让上一次请求的地图数据污染下一次决策；run 级天然有界、请求结束即失效。
+- **理由 —— 为什么"外置"而不是"截断"**：截断是**不可恢复**的信息丢失，Agent 只能猜；外置让信息留在手边、按需取回，
+  代价是一次额外的工具往返。这也让"省 token"与"保信息"不再是对立选项。
+- **理由 —— 为什么计量先行**：没有"能测到你正要优化的那个指标"的观测，优化无法验证真伪（这正是本项目 D-006 的教训）。
+  实测该计量器立刻改掉了我一个错误判断：我原以为历史是均匀累积的，曲线显示是单条巨物。
+- **被否**：
+  - *直接把超长结果截断*（不可恢复的信息丢失，会以质量下降为代价换 token —— 而实测不截断也能做到 −81%）；
+  - *只换更大上下文的模型*（窗口已有 **1M**，问题从来不是"装不下"，而是**每次重发都要付费**）；
+  - *上 RAG / 向量检索*（它解决"读不到"，而我们的问题是"写到爆"，属写侧驱逐/外置问题）；
+  - *用历史压缩（机制 C）替代外置*（压缩有损且对所有内容一视同仁，而问题只出在少数几条巨物上；C 排到 A/B 之后再评估）；
+  - *靠人工肉眼核对结果*（几十次运行不可能靠眼睛，必须自动化）。
+- **效果与代价（筛选轮 n=1，见 EXP-002 报告）**：token **1,073,065 → 200,209（−81%）**，盲评质量 22 → **24**（未降），
+  代价是延迟 **+26%**（84s → 106s）与 LLM 调用 **+2 次**（`read_artifact` 取回）。
+  **保留：n=1 只能当强信号**，确认轮未做。
+- **计量口径（重要，别误读其输出）**：`[ContextMeter]` 里的**真实 token 来自厂商 usage，是准的**；
+  但"schema 占比 / 历史占比"是由字符数估算的（中文约 1 token/字符、英文 JSON 约 4 字符/token），**只用于横向对比**。
+  要精确归因，用"外置开 / 关两条曲线的差值"，不要用那个百分比。
+
+---
+
+## D-024 跑批工具链的四个坑：都属于「看起来正常的错误数据」
+
+- **背景**：EXP-002 开发期间，跑批脚本与采集链路连续出现四个问题，**没有一个表现为"明显的失败"** ——
+  它们要么静默产出错误数字，要么把好环境误判成坏环境。
+- **四坑与修法**：
+
+  | # | 坑 | 症状 | 修法 |
+  |---|---|---|---|
+  | 1 | 门禁探活用 `curl --max-time 8` | SSE 端点握手偶发超 8 秒 → 返回 `000` → **把好地址误判为失效**、整批被门禁拦下（幸运的是 0 token 消耗） | 提到 20 秒 + 重试一次；并记录"curl 读 SSE 会一直挂到 max-time 属正常" |
+  | 2 | **PowerShell 数组对 `-eq` 是过滤语义**（返回数组而非布尔） | `ConvertTo-Json` 把它序列化成 `"contextBudget":[]` → 服务端 Jackson 报 `Cannot deserialize Boolean from Array value` → **HTTP 400**，且**不烧 token**，极难察觉 | 显式取首元素 + 显式 `[bool]` 转换：`[bool]([string]@($x)[0] -eq 'on')` |
+  | 3 | 坑 2 曾把 `$budget` 数组格式化进文件名 → 产生 `single_bSystem.String[]_P1_r1.json` | **PowerShell 把路径里的 `[ ]` 当通配符**，`Get-Content -Raw` 参数绑定直接失败 → 整个重采循环被中断 | 读写文件一律用 `-LiteralPath`；解析失败只跳过并告警，不中断整批 |
+  | 4 | 请求异常被 `catch` 静默吞掉 | 一轮变成"没有数据"，与"数据为 0"无法区分（与 D-022 同一类错误） | catch 里**显式打印**错误与耗时；记录里保留 `requestBody` 便于事后定位 |
+
+- **决定（写成纪律）**：
+  1. **禁止静默默认值**：脚本里任何"取值失败就当成 0 / 当成空"的写法都要改成显式报错或显式跳过+告警；
+  2. **区分"缺数据"与"数据为 0"**：聚合前先校验字段存在性，输出里标注 n（有效样本数）；
+  3. **文件路径一律 `-LiteralPath`**（本项目的实验产物文件名由变量拼装，出现方括号并非不可能）；
+  4. **门禁探活要给足超时并重试**，且探活失败只暂停、不修改任何状态 —— 它拦住一次运行的成本，远低于放坏数据进组的成本。
+- **理由**：这四条的共同点是 —— **"看起来正常但内部错误"的数据比"明显报错"危险得多**。
+  明显报错会立刻停止并迫使你处理；而一个 `[]` 或一个 0 会安静地流进汇总表，产出一份格式完全正确、结论完全错误的报告。
+  本项目已经在这同一类问题上栽过三次（D-022 的"0 分"、D-021 的低估、本条的 400）。
+- **被否**：*人工肉眼核对*（几十次运行不可行，且人正是最容易被"正常格式"骗过的环节）；
+  *把脚本写得更简单以少踩坑*（这些坑来自 PowerShell 与 HTTP 语义本身，不是复杂度带来的，简化不解决）。
+
+---
+
 ## 待验证 / 路线图
 
-- **观测链路的目标状态**：跑一次 `POST /app` 后，Langfuse 的 Tracing 列表里出现对应 trace，并能看到 LLM 调用与 token。
-  - 已完成的子验证：① OTLP 摄取通路可用（自托管时查 ClickHouse `events_core` 确认）；② **应用侧确实在导出 span**（`tools/otlp-sink.ps1` 收到 7 次 protobuf 请求）；③ Key 缺失时优雅降级（三个服务各打一条警告，`/api/health` 仍 UP）。
-  - **尚未验证**：AgentScope 的 OTel span 能否被 Langfuse **正确渲染**成 trace 与 token 账目 —— 这是接上真 Key 后的第一件要确认的事。**这一档的准确表述是「代码就绪但未实测」，不是「已验收」。**
+- **观测链路的目标状态 → 已达成（2026-10-05）**：跑一次 `POST /app` 后，Langfuse 里出现对应 trace，且能看到 LLM 调用与 token 账目。实测数据见 `STATUS.md` 第一节 #8 / #9（56 条 observation、85,063 tokens）；查询口径见 D-018。本条取代原先「尚未验证」的表述。
+  - 历史子验证（保留作分段排查入口）：① OTLP 摄取通路可用（自托管时查 ClickHouse `events_core` 确认）；② 应用侧确实在导出 span（`tools/otlp-sink.ps1` 收到 7 次 protobuf 请求）；③ Key 缺失时优雅降级（三个服务各打一条警告，`/api/health` 仍 UP）。
+  - 留下的教训：**「渲染不出来 / 没有账目」时先怀疑自己的查询口径**（D-018 就是这么绕了几轮）。
 - **单 Agent vs 多 Agent 对照实验**：测量口径与通过标准待定。候选维度：完成质量（人工/LLM 打分）、端到端耗时、`toolBatches` 并行度、模型调用次数与 token、失败率。
   - ⚠️ **公平性提醒**：多 Agent 的答案由主管 Agent **二次汇总**过，单 Agent 没有这一层。不控制这个差异（例如让单 Agent 也走一次复述整理），结论会被「多一次汇总」污染。
   - ⚠️ **成本提醒**：一次完整 3-Agent 流程约 30~50 次模型调用，跑两组 × 多轮 prompt 前先估额度。

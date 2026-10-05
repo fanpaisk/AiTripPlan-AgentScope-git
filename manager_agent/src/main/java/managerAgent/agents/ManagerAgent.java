@@ -1,13 +1,19 @@
 package managerAgent.agents;
 
+import config.AgentScopeProperties;
+import context.ArtifactStore;
+import context.ContextProperties;
+import context.ReadArtifactTool;
 import io.agentscope.core.ReActAgent;
 import io.agentscope.core.a2a.agent.card.AgentCardResolver;
 import io.agentscope.core.agent.Event;
 import io.agentscope.core.nacos.a2a.discovery.NacosAgentCardResolver;
 import io.agentscope.core.model.ExecutionConfig;
 import io.agentscope.core.plan.PlanNotebook;
+import io.agentscope.core.skill.AgentSkill;
+import io.agentscope.core.skill.SkillBox;
 import io.agentscope.core.tool.Toolkit;
-import config.AgentScopeProperties;
+import io.agentscope.core.tool.mcp.McpClientWrapper;
 import managerAgent.config.ManagerAgentProperties;
 import managerAgent.hook.PlanHook;
 import managerAgent.hook.TraceHook;
@@ -15,17 +21,22 @@ import managerAgent.plan.TripPlan;
 import managerAgent.tool.RemoteAgentTool;
 import managerAgent.trace.RunTrace;
 import managerAgent.trace.RunTraceRegistry;
+import mcp.BaiduMapMCP;
+import mcp.OffloadingMcpClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import reactor.core.publisher.Flux;
+import tools.Calculate;
 import utils.AgentUtils;
 import utils.NacosUtil;
+import utils.SkillUtils;
 import utils.ToolUtils;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -39,6 +50,15 @@ import java.util.concurrent.atomic.AtomicReference;
  *   <li>请求之间不会共享 Memory，避免串话；</li>
  *   <li>ReActAgent 内部有"正在运行"标志位，共享实例并发调用会直接抛异常。</li>
  * </ul>
+ *
+ * <p><b>两种运行模式（EXP-001 对照实验）：</b></p>
+ * <ul>
+ *   <li>{@code multi}（默认）：用 PlanNotebook 拆任务，把子任务经 A2A 派发给远程专业 Agent；</li>
+ *   <li>{@code single}：一个 Agent 自己持有全部能力（地图 MCP + Skills + 计算工具 + PlanNotebook），
+ *       <b>不做任何派发</b> —— 用来回答"多 Agent 的分工到底值不值它多花的 token"。</li>
+ * </ul>
+ * <p>模式可由配置 {@code app.manager.mode} 决定，也可由请求体 {@code mode} 字段逐次覆盖。
+ * 用请求级覆盖而不是重启服务来切臂，是为了避免 JIT 预热差异污染延迟对比。</p>
  */
 @Component
 public class ManagerAgent {
@@ -68,11 +88,63 @@ public class ManagerAgent {
               ⑤天气与注意事项 ⑥预算估算。
             """;
 
+    /**
+     * 单 Agent 模式（EXP-001 对照实验的 A2 臂）的系统提示词。
+     *
+     * <p><b>撰写原则（关系到实验是否公平）：</b>
+     * 必须与多 Agent 臂「最终作答」的要求对齐 —— 同样的六段输出结构、同样要求真实数据、
+     * 同样要求独立调用一次性批量发出（否则 toolBatches 并行度就没法对比）、
+     * 同样要求失败如实说明（对应已知缺陷 D2）。
+     * 差别只应有一处：<b>它没有子 Agent 可派发，必须自己做完全部工作</b>。</p>
+     */
+    private static final String SINGLE_SYS_PROMPT = """
+            你是 AiTripPlan 的「全能行程规划智能体」，需要独立完成从路线到行程的全部规划工作。
+
+            【你的能力】
+            1. 计划工具（PlanNotebook）：把复杂需求拆解为可执行的步骤并跟踪进度。
+            2. 百度地图工具：地理编码、驾车路线规划、距离与耗时、路况、周边 POI、逆地理编码。
+            3. 技能（Skill）：按需加载，获取景点推荐与表格制作的规则说明。
+            4. 计算工具：预算、油耗等数值必须用它算，不要心算。
+
+            【工作方式】
+            1. 先解析需求中的关键要素：出发地、目的地、日期、天数、交通方式、人数、预算与偏好。
+            2. ★ 需要真实路线数据时，调用百度地图工具获取真实距离与耗时；
+               严禁把估算值当成真实数据，拿不到时必须显式说明，并标注哪些数字是估算值。
+            3. ★ 互相独立的工具调用（例如多个地点的地理编码、路线与距离），
+               必须在【同一次回复里一次性发出多个工具调用】，这样它们会被并行执行，
+               总耗时取最慢的那个而不是相加；有先后依赖的（先查天气再据此排行程）必须分轮次串行。
+            4. ★ 技能只需加载一次了解规则即可，不要反复读取技能里的资源文件；
+               某个资源不存在就跳过，不要重试。
+            5. 如果某个工具调用失败，如实说明失败原因，不要编造结果，也不要反复重试无望的接口。
+
+            【输出要求】
+            使用 Markdown，最终输出一份完整、可直接执行的行程方案，包含：
+            ①总体路线与时间安排 ②每日行程 ③餐饮推荐 ④住宿建议 ⑤天气与注意事项 ⑥预算估算。
+            直接给结论，不要长篇分析，也不要反复向用户确认。
+
+            ★ 最后一条回复必须【就是方案正文本身】：
+            - 不要把方案写在中间轮次、末尾只写「已完成 / 上方已给出」之类的收尾总结；
+            - 不要在末尾附加「如需我再帮你生成 1 人版 / 导出表格」之类的后续服务建议；
+            - 用户拿到的就是最后这一条消息，它必须能独立阅读、内容完整。
+            """;
+
     private final io.agentscope.core.model.Model model;
     private final ManagerAgentProperties properties;
     private final AgentScopeProperties commonsProperties;
     private final RunTraceRegistry traceRegistry;
     private final ObjectProvider<AgentCardResolver> agentCardResolverProvider;
+
+    /** 百度地图 MCP 客户端：单 Agent 模式需要它来提供真实路线数据（Bean 在 commons，懒加载） */
+    private final BaiduMapMCP baiduMapMCP;
+
+    /** 上下文预算配置：工具结果外置阈值、预览与取回长度（EXP-002 机制 B） */
+    private final ContextProperties contextProperties;
+
+    /**
+     * Skills：单 Agent 模式要挂载，与行程规划的子 Agent 用的是同一套（都从 classpath:skills 载入）。
+     * 启动时载入一次，避免每次创建 Agent 都读 jar。多 Agent 模式下不使用它。
+     */
+    private final List<AgentSkill> skills;
 
     /** 兜底用的 Resolver：万一 starter 没有提供 AgentCardResolver Bean，就用自己建的 */
     private volatile AgentCardResolver fallbackResolver;
@@ -81,21 +153,56 @@ public class ManagerAgent {
                         ManagerAgentProperties properties,
                         AgentScopeProperties commonsProperties,
                         RunTraceRegistry traceRegistry,
-                        ObjectProvider<AgentCardResolver> agentCardResolverProvider) {
+                        ObjectProvider<AgentCardResolver> agentCardResolverProvider,
+                        BaiduMapMCP baiduMapMCP,
+                        ContextProperties contextProperties) {
         this.model = model;
         this.properties = properties;
         this.commonsProperties = commonsProperties;
         this.traceRegistry = traceRegistry;
         this.agentCardResolverProvider = agentCardResolverProvider;
+        this.baiduMapMCP = baiduMapMCP;
+        this.contextProperties = contextProperties;
+        this.skills = SkillUtils.loadClasspathSkills("skills", properties.getName());
     }
 
     /**
      * author: Imooc
-     * description: 组装一个全新的主管 Agent
+     * description: 组装一个全新的 Agent（按配置里的默认模式）
      * @param trace: 本次运行的轨迹对象，会被 TraceHook 写入
      * @return io.agentscope.core.ReActAgent
      */
     public ReActAgent newAgent(RunTrace trace) {
+        return newAgent(trace, properties.isSingleMode(), contextProperties.isOffloadEnabled());
+    }
+
+    /**
+     * author: Imooc
+     * description: 组装一个全新的 Agent（显式指定模式）
+     * @param trace: 本次运行的轨迹对象
+     * @param single: true = 单 Agent 模式（自己做完）；false = 多 Agent 模式（派发给远程子 Agent）
+     * @return io.agentscope.core.ReActAgent
+     */
+    public ReActAgent newAgent(RunTrace trace, boolean single) {
+        return newAgent(trace, single, contextProperties.isOffloadEnabled());
+    }
+
+    /**
+     * author: Imooc
+     * description: 组装一个全新的 Agent（模式与外置开关都可显式指定）
+     * @param trace: 本次运行的轨迹对象
+     * @param single: true = 单 Agent 模式
+     * @param offload: true = 启用工具结果外置（EXP-002 机制 B）
+     * @return io.agentscope.core.ReActAgent
+     */
+    public ReActAgent newAgent(RunTrace trace, boolean single, boolean offload) {
+        return single ? newSingleAgent(trace, offload) : newMultiAgent(trace);
+    }
+
+    /**
+     * 多 Agent 臂：主管 + PlanNotebook + 远程子 Agent（现状行为，未改动）。
+     */
+    private ReActAgent newMultiAgent(RunTrace trace) {
 
         // ★ 关键：必须显式开并行。AgentScope 的 ToolkitConfig.parallel 默认是 false，
         //   用 new Toolkit() 会让同一轮里的多个工具调用串行执行（Flux.concat），
@@ -149,15 +256,119 @@ public class ManagerAgent {
     }
 
     /**
+     * 单 Agent 臂（EXP-001 的 A2）：一个 Agent 持有全部能力，不做任何派发。
+     *
+     * <p>能力对齐清单（与多 Agent 臂合起来拥有的能力一致）：</p>
+     * <ul>
+     *   <li>百度地图 MCP 全部工具（与路线子 Agent 同一份客户端实现，见 commons 的 {@code mcp.BaiduMapMCP}）</li>
+     *   <li>Skills（与行程子 Agent 同一套，从 classpath:skills 载入）</li>
+     *   <li>计算工具 {@code tools.Calculate}（与行程子 Agent 同一个类）</li>
+     *   <li>PlanNotebook（主管本来就有，保留 —— 它是"规划工具"而不是"派发"，去掉会变成对单 Agent 不公平）</li>
+     * </ul>
+     *
+     * <p>唯一的差别就是：<b>没有子 Agent 可以派发</b>。这正是本实验要测量的变量。</p>
+     */
+    private ReActAgent newSingleAgent(RunTrace trace, boolean offload) {
+
+        //1. 工具包：地图 MCP 工具 + 计算工具
+        ToolUtils toolUtils = new ToolUtils(commonsProperties.isToolParallel());
+
+        // ★ 上下文预算（机制 B）：把超长的地图返回「外置」，上下文里只留摘要 + id。
+        //   必须用装饰后的客户端注册，否则 toolkit 内部持有的是原始客户端，拦截不到。
+        ArtifactStore artifactStore = new ArtifactStore();
+        McpClientWrapper mcpClient = baiduMapMCP.initBaiduMapMCP();
+        if (offload && mcpClient != null) {
+            mcpClient = new OffloadingMcpClient(mcpClient, artifactStore,
+                    contextProperties.getOffloadThresholdChars(),
+                    contextProperties.getPreviewChars());
+            log.info("[ManagerAgent] 单 Agent 模式：工具结果外置已开启（阈值 {} 字符，预览 {} 字符）",
+                    contextProperties.getOffloadThresholdChars(), contextProperties.getPreviewChars());
+        } else {
+            log.info("[ManagerAgent] 单 Agent 模式：工具结果外置【关闭】（基线组）");
+        }
+        Toolkit toolkit = toolUtils.registerMcpClient(mcpClient);
+
+        // 计算工具（预算/油耗等），与行程子 Agent 用的是同一个类
+        toolkit.registration().tool(new Calculate()).apply();
+
+        // 与结果外置配套的「按需取回」工具：Agent 需要细节时自己去取，而不是让全部内容常驻上下文
+        if (offload) {
+            toolkit.registration()
+                    .tool(new ReadArtifactTool(artifactStore, contextProperties.getRetrieveChars()))
+                    .apply();
+        }
+
+        log.info("[ManagerAgent] 单 Agent 模式：已挂载 {} 个工具：{}（工具并行={}）",
+                toolkit.getToolNames().size(), toolkit.getToolNames(), commonsProperties.isToolParallel());
+
+        //2. Skills：与行程子 Agent 同一套
+        SkillBox skillBox = new SkillBox(toolkit);
+        for (AgentSkill skill : skills) {
+            skillBox.registerSkill(skill);
+        }
+        log.info("[ManagerAgent] 单 Agent 模式：已注册 {} 个 Skill：{}",
+                skillBox.getAllSkillIds().size(), skillBox.getAllSkillIds());
+
+        //3. PlanNotebook：与多 Agent 臂保持一致（规划能力不属于"派发"）
+        PlanNotebook planNotebook = new TripPlan(properties).getPlan();
+
+        //4. 组装 Agent。名字带 Single 后缀，便于在 Langfuse 里区分两条臂的 trace
+        return AgentUtils.getReActAgentBuilder(
+                        properties.getName() + "Single",
+                        "单Agent基线：自己完成从路线到行程的全部规划（EXP-001 对照实验用）",
+                        model,
+                        SINGLE_SYS_PROMPT)
+                // 单 Agent 要独自完成子 Agent 们的工作，迭代上限给得更宽，
+                // 目的是让两条臂都【不会触顶】—— 触顶了比的就是预算而不是架构了
+                .maxIters(properties.getSingleMaxIters())
+                .toolExecutionConfig(ExecutionConfig.builder()
+                        .timeout(commonsProperties.getToolExecutionTimeout())
+                        .build())
+                .toolkit(toolkit)
+                .skillBox(skillBox)
+                .planNotebook(planNotebook)
+                .hook(new PlanHook(planNotebook))
+                .hook(new TraceHook(trace))
+                .build();
+    }
+
+    /**
      * author: Imooc
-     * description: 同步执行一次：发给主管 Agent，等它把整条链路跑完
+     * description: 同步执行一次：发给 Agent，等它把整条链路跑完（用配置的默认模式）
      * @param prompt: 用户 Prompt
      * @return managerAgent.trace.RunTrace
      */
     public RunTrace invoke(String prompt) {
+        return invoke(prompt, null, null);
+    }
+
+    /**
+     * author: Imooc
+     * description: 同步执行一次（可逐请求覆盖模式）
+     * @param prompt: 用户 Prompt
+     * @param modeOverride: 请求级模式覆盖（"multi" / "single"）；null 或空 = 用配置默认值
+     * @return managerAgent.trace.RunTrace
+     */
+    public RunTrace invoke(String prompt, String modeOverride) {
+        return invoke(prompt, modeOverride, null);
+    }
+
+    /**
+     * author: Imooc
+     * description: 同步执行一次（模式与上下文预算都可逐请求覆盖）
+     * @param prompt: 用户 Prompt
+     * @param modeOverride: 请求级模式覆盖；null 或空 = 用配置默认值
+     * @param budgetOverride: 是否启用工具结果外置；null = 用配置默认值
+     * @return managerAgent.trace.RunTrace
+     */
+    public RunTrace invoke(String prompt, String modeOverride, Boolean budgetOverride) {
         RunTrace trace = newTrace(prompt);
+        boolean single = resolveSingle(modeOverride);
+        boolean offload = budgetOverride == null ? contextProperties.isOffloadEnabled() : budgetOverride;
+        trace.setMode(single ? "single" : "multi");
+        trace.setContextBudget(offload);
         try {
-            ReActAgent agent = newAgent(trace);
+            ReActAgent agent = newAgent(trace, single, offload);
             String answer = AgentUtils.collectFinalText(
                     AgentUtils.streamResponse(agent, prompt),
                     commonsProperties.getRunTimeout());
@@ -176,8 +387,35 @@ public class ManagerAgent {
      * @return managerAgent.agents.ManagerAgent.StreamedRun
      */
     public StreamedRun streamRun(String prompt) {
+        return streamRun(prompt, null, null);
+    }
+
+    /**
+     * author: Imooc
+     * description: 流式执行一次（可逐请求覆盖模式）
+     * @param prompt: 用户 Prompt
+     * @param modeOverride: 请求级模式覆盖；null 或空 = 用配置默认值
+     * @return managerAgent.agents.ManagerAgent.StreamedRun
+     */
+    public StreamedRun streamRun(String prompt, String modeOverride) {
+        return streamRun(prompt, modeOverride, null);
+    }
+
+    /**
+     * author: Imooc
+     * description: 流式执行一次（模式与上下文预算都可逐请求覆盖）
+     * @param prompt: 用户 Prompt
+     * @param modeOverride: 请求级模式覆盖；null 或空 = 用配置默认值
+     * @param budgetOverride: 是否启用工具结果外置；null = 用配置默认值
+     * @return managerAgent.agents.ManagerAgent.StreamedRun
+     */
+    public StreamedRun streamRun(String prompt, String modeOverride, Boolean budgetOverride) {
         RunTrace trace = newTrace(prompt);
-        ReActAgent agent = newAgent(trace);
+        boolean single = resolveSingle(modeOverride);
+        boolean offload = budgetOverride == null ? contextProperties.isOffloadEnabled() : budgetOverride;
+        trace.setMode(single ? "single" : "multi");
+        trace.setContextBudget(offload);
+        ReActAgent agent = newAgent(trace, single, offload);
 
         AtomicReference<String> lastText = new AtomicReference<>("");
 
@@ -192,6 +430,13 @@ public class ManagerAgent {
                 .doOnError(trace::fail);
 
         return new StreamedRun(trace, events);
+    }
+
+    /** 解析最终生效的模式：请求级覆盖优先，否则用配置默认值 */
+    private boolean resolveSingle(String modeOverride) {
+        return StringUtils.hasText(modeOverride)
+                ? ManagerAgentProperties.isSingle(modeOverride)
+                : properties.isSingleMode();
     }
 
     private RunTrace newTrace(String prompt) {

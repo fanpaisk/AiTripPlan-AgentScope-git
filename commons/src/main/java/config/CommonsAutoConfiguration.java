@@ -1,9 +1,12 @@
 package config;
 
+import context.ContextProperties;
 import io.agentscope.core.model.DashScopeChatModel;
 import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.model.OpenAIChatModel;
+import mcp.BaiduMapMCP;
+import meter.ContextMeterModel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -28,10 +31,31 @@ import org.springframework.util.StringUtils;
  * 代码零改动。百炼、DeepSeek、Kimi、智谱、SiliconFlow、本地 vLLM/Ollama 都适用。</p>
  */
 @AutoConfiguration
-@EnableConfigurationProperties(AgentScopeProperties.class)
+@EnableConfigurationProperties({AgentScopeProperties.class, BaiduMapProperties.class, ContextProperties.class})
 public class CommonsAutoConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(CommonsAutoConfiguration.class);
+
+    /**
+     * author: Imooc
+     * description: 百度地图 MCP 客户端（公共 Bean，供路线 Agent 与单 Agent 复用）
+     *
+     * <p>用 {@code @Bean} 而不是在 {@code BaiduMapMCP} 上打 {@code @Component}：
+     * 本模块的包名是 {@code config} / {@code mcp} / {@code utils}，
+     * 不在三个启动类所在的基础包（managerAgent / routeMakingAgent / tripPlannerAgent）之下，
+     * 组件扫描扫不到，只能由自动装配显式提供。</p>
+     *
+     * <p>该 Bean <b>懒加载</b>：不调用 {@code getBaiduMapMCP()} 就不会建立任何连接，
+     * 所以不挂地图工具的模块拿到它也没有副作用。</p>
+     *
+     * @param properties: app.baidu-map.* 配置
+     * @return mcp.BaiduMapMCP
+     */
+    @Bean
+    @ConditionalOnMissingBean(BaiduMapMCP.class)
+    public BaiduMapMCP baiduMapMCP(BaiduMapProperties properties) {
+        return new BaiduMapMCP(properties);
+    }
 
     /** 百炼 OpenAI 兼容模式的默认地址（base-url 留空且 provider=openai-compatible 时使用） */
     public static final String DEFAULT_OPENAI_COMPATIBLE_BASE_URL =
@@ -45,7 +69,7 @@ public class CommonsAutoConfiguration {
      */
     @Bean
     @ConditionalOnMissingBean(Model.class)
-    public Model llmChatModel(AgentScopeProperties properties) {
+    public Model llmChatModel(AgentScopeProperties properties, ContextProperties contextProperties) {
 
         AgentScopeProperties.Llm cfg = properties.getLlm();
 
@@ -72,10 +96,18 @@ public class CommonsAutoConfiguration {
             throw new IllegalStateException("app.agentscope.llm.model（或 .env 的 LLM_MODEL）不能为空");
         }
 
-        return switch (cfg.getProvider()) {
+        Model built = switch (cfg.getProvider()) {
             case OPENAI_COMPATIBLE -> buildOpenAiCompatibleModel(cfg, modelName);
             case DASHSCOPE -> buildNativeDashScopeModel(cfg, modelName);
         };
+
+        // ★ 上下文计量：装饰模型，每次 LLM 调用打印真实输入/输出 token 与上下文构成
+        //   （工具 schema 占多少 / 系统+历史+工具结果占多少）。没有它就无法验证上下文优化是否生效。
+        if (contextProperties.isMeterEnabled()) {
+            log.info("[commons] 上下文计量已开启：每次调用会打印 [ContextMeter] 行");
+            return new ContextMeterModel(built, modelName);
+        }
+        return built;
     }
 
     /**

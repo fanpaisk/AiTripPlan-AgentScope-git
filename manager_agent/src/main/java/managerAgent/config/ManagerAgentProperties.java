@@ -29,11 +29,35 @@ public class ManagerAgentProperties {
     /** 计划步骤是否需要用户确认。HTTP 场景下必须为 false，否则 Agent 会停下来等人输入 */
     private boolean needUserConfirm = false;
 
+    /**
+     * 运行模式（EXP-001 对照实验的开关）。
+     *
+     * <ul>
+     *   <li>{@code multi}（默认）：现状行为 —— 主管 Agent 用 PlanNotebook 拆任务，
+     *       经 A2A 派发给远程子 Agent；</li>
+     *   <li>{@code single}：单个 Agent 自己持有全部能力（地图 MCP + Skills + 计算工具 + PlanNotebook），
+     *       <b>不做任何派发</b>。</li>
+     * </ul>
+     *
+     * <p>两臂必须能靠请求级覆盖切换（见 {@code ChatRequest#mode}），
+     * 不要靠重启服务来切 —— 否则 JIT 预热差异会污染延迟对比。</p>
+     */
+    private String mode = "multi";
+
     /** PlanNotebook 允许拆解出的最大子任务数 */
     private int maxSubtasks = 6;
 
     /** 最大推理轮数 */
     private int maxIters = 25;
+
+    /**
+     * 单 Agent 模式的最大推理轮数。
+     *
+     * <p>比 {@link #maxIters} 给得更宽：单 Agent 要独自完成两个子 Agent 的工作量。
+     * <b>目的是让两条臂都不触顶</b> —— 一旦某一臂触顶，比的就是预算而不是架构了。
+     * 实验时需记录各轮是否触顶。</p>
+     */
+    private int singleMaxIters = 40;
 
     /**
      * 单个子 Agent 返回内容的最大字符数。
@@ -87,6 +111,24 @@ public class ManagerAgentProperties {
         this.needUserConfirm = needUserConfirm;
     }
 
+    public String getMode() {
+        return mode;
+    }
+
+    public void setMode(String mode) {
+        this.mode = mode;
+    }
+
+    /** 配置默认是否走单 Agent 模式 */
+    public boolean isSingleMode() {
+        return isSingle(mode);
+    }
+
+    /** 判定任意 mode 取值是否为单 Agent 模式；null / 空 / 未知值一律按多 Agent 处理（安全默认） */
+    public static boolean isSingle(String mode) {
+        return "single".equalsIgnoreCase(mode == null ? "" : mode.trim());
+    }
+
     public int getMaxSubtasks() {
         return maxSubtasks;
     }
@@ -101,6 +143,14 @@ public class ManagerAgentProperties {
 
     public void setMaxIters(int maxIters) {
         this.maxIters = maxIters;
+    }
+
+    public int getSingleMaxIters() {
+        return singleMaxIters;
+    }
+
+    public void setSingleMaxIters(int singleMaxIters) {
+        this.singleMaxIters = singleMaxIters;
     }
 
     public List<RemoteAgent> getRemoteAgents() {

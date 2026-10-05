@@ -5,13 +5,13 @@ import io.agentscope.core.ReActAgent;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.skill.AgentSkill;
 import io.agentscope.core.skill.SkillBox;
-import io.agentscope.core.skill.util.JarSkillRepositoryAdapter;
 import io.agentscope.core.tool.Toolkit;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
-import tripPlannerAgent.tool.Calculate;
+import tools.Calculate;
 import utils.AgentUtils;
+import utils.SkillUtils;
 import utils.ToolUtils;
 
 import java.util.ArrayList;
@@ -72,18 +72,9 @@ public class SuggestSightAgent {
 
     @PostConstruct
     void loadSkills() {
-        try (JarSkillRepositoryAdapter repository = new JarSkillRepositoryAdapter("skills")) {
-            List<AgentSkill> loaded = repository.getAllSkills();
-            if (loaded != null) {
-                skills.addAll(loaded);
-            }
-            log.info("[{}] 从 classpath:skills 载入 {} 个 Skill：{}",
-                    AGENT_NAME, skills.size(),
-                    skills.stream().map(AgentSkill::getName).toList());
-        } catch (Exception e) {
-            log.error("[{}] 载入 skills 失败，Agent 将在没有技能的情况下运行：{}",
-                    AGENT_NAME, e.getMessage());
-        }
+        // 载入逻辑已抽到 commons（utils.SkillUtils）：单 Agent 对照实验臂要挂同一套 Skill，
+        // 实现只保留一份，避免两边各自腐化。
+        skills.addAll(SkillUtils.loadClasspathSkills("skills", AGENT_NAME));
     }
 
     /**

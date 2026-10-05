@@ -18,6 +18,8 @@ import java.util.List;
  * 必须靠「批内各工具耗时之和 ÷ 批次墙钟耗时」这个比值来判断。</p>
  */
 public record ChatResponse(String runId,
+                           String mode,
+                           boolean contextBudget,
                            String status,
                            String answer,
                            String error,
@@ -30,6 +32,10 @@ public record ChatResponse(String runId,
         List<RunTrace.ToolBatch> batches = trace.getParallelizableBatches();
         return new ChatResponse(
                 trace.getRunId(),
+                // 本次生效的模式（multi / single）：EXP-001 跑批时据此判定这一轮属于哪条臂
+                trace.getMode(),
+                // 本次是否启用工具结果外置（EXP-002 消融时据此判定属于哪个档）
+                trace.isContextBudget(),
                 trace.getStatus(),
                 trace.getAnswer(),
                 trace.getError(),

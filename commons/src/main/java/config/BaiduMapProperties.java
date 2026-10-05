@@ -1,4 +1,4 @@
-package routeMakingAgent.config;
+package config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
@@ -8,6 +8,11 @@ import java.time.Duration;
  * author: Imooc
  * description: 百度地图 MCP 配置（app.baidu-map.*）
  * date: 2026
+ *
+ * <p><b>为什么这个类在 commons 而不是 routeMaking_agent：</b>
+ * 单 Agent 对照实验（EXP-001）需要让主管 Agent 也直接持有地图工具，
+ * 与「多 Agent 派发」那一臂能力对齐。地图客户端是纯基础设施、与业务无关，
+ * 放在公共模块后两个模块复用同一份实现，避免拷贝一份出来各自腐化。</p>
  */
 @ConfigurationProperties(prefix = "app.baidu-map")
 public class BaiduMapProperties {

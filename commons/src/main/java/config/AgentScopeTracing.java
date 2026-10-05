@@ -127,9 +127,13 @@ public class AgentScopeTracing implements DisposableBean {
                     (cfg.getPublicKey().trim() + ":" + cfg.getSecretKey().trim())
                             .getBytes(StandardCharsets.UTF_8));
 
+            // Langfuse v4：直连 OTLP 上报必须带 x-langfuse-ingestion-version: 4，
+            // 否则数据会按旧数据模型摄取，表现为「跑完了但 Tracing 列表最多要等 10 分钟才出现」，
+            // 极易被误判成 Key 或端点有问题。见 https://langfuse.com/integrations/native/opentelemetry
             OtlpHttpSpanExporter exporter = OtlpHttpSpanExporter.builder()
                     .setEndpoint(endpoint)
                     .addHeader("Authorization", "Basic " + auth)
+                    .addHeader("x-langfuse-ingestion-version", "4")
                     .build();
 
             // 3) 自己建 provider，留着引用以便停机时 flush

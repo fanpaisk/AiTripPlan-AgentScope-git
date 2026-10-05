@@ -61,7 +61,10 @@ public class AppController {
         String prompt = requirePrompt(request);
 
         long start = System.currentTimeMillis();
-        var trace = managerAgent.invoke(prompt);
+        // mode 与 contextBudget 都是请求级覆盖：留空则用配置默认值
+        var trace = managerAgent.invoke(prompt,
+                request == null ? null : request.mode(),
+                request == null ? null : request.contextBudget());
         log.info("[AppController] 同步请求完成，runId={}, 耗时 {} ms", trace.getRunId(),
                 System.currentTimeMillis() - start);
 
@@ -80,7 +83,9 @@ public class AppController {
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<StreamChunk>> stream(@RequestBody(required = false) ChatRequest request) {
         String prompt = requirePrompt(request);
-        ManagerAgent.StreamedRun run = managerAgent.streamRun(prompt);
+        ManagerAgent.StreamedRun run = managerAgent.streamRun(prompt,
+                request == null ? null : request.mode(),
+                request == null ? null : request.contextBudget());
         String runId = run.trace().getRunId();
 
         log.info("[AppController] 收到流式请求 runId={}", runId);

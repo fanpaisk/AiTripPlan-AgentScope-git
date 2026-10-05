@@ -1,4 +1,4 @@
-package tripPlannerAgent.tool;
+package tools;
 
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;

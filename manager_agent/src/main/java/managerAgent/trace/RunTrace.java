@@ -75,6 +75,16 @@ public class RunTrace {
     private volatile String answer = "";
     private volatile String error;
 
+    /**
+     * 本次运行生效的模式："multi"（主管 + 远程子 Agent）或 "single"（单 Agent 自己做完）。
+     * 由 EXP-001 对照实验引入：跑批时要能直接从轨迹里读出击的是哪条臂，
+     * 而不是靠事后猜时间窗口。
+     */
+    private volatile String mode = "multi";
+
+    /** 本次运行是否启用了「工具结果外置」（EXP-002 机制 B）：跑批时据此判定这一轮属于哪个对照档 */
+    private volatile boolean contextBudget = true;
+
     private final List<Step> steps = Collections.synchronizedList(new ArrayList<>());
 
     /**
@@ -255,6 +265,22 @@ public class RunTrace {
 
     public String getError() {
         return error;
+    }
+
+    public String getMode() {
+        return mode;
+    }
+
+    public void setMode(String mode) {
+        this.mode = mode;
+    }
+
+    public boolean isContextBudget() {
+        return contextBudget;
+    }
+
+    public void setContextBudget(boolean contextBudget) {
+        this.contextBudget = contextBudget;
     }
 
     public List<Step> getSteps() {

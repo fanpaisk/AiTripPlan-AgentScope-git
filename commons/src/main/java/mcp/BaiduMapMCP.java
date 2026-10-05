@@ -1,12 +1,11 @@
-package routeMakingAgent.mcp;
+package mcp;
 
+import config.BaiduMapProperties;
 import io.agentscope.core.tool.mcp.McpClientBuilder;
 import io.agentscope.core.tool.mcp.McpClientWrapper;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
-import routeMakingAgent.config.BaiduMapProperties;
 
 /**
  * author: Imooc
@@ -17,9 +16,16 @@ import routeMakingAgent.config.BaiduMapProperties;
  * 并且<b>地址缺失 / 连接失败时只告警不抛异常</b>——
  * 这样即使百度地图 MCP 挂了，路线制定 Agent 依然能启动并注册到 Nacos，
  * 主管 Agent 调用它时会拿到"地图工具不可用"的明确提示，而不是整个服务起不来。</p>
+ *
+ * <p><b>为什么这个类在 commons：</b>路线 Agent 与（对照实验的）单 Agent 都要挂同一套地图工具。
+ * 落在公共模块后由 {@code CommonsAutoConfiguration} 统一声明为 Bean ——
+ * <b>注意此处刻意不加 {@code @Component}</b>：commons 的包不在三个启动类的基础包之下，
+ * 组件扫描扫不到它（见 {@code CommonsAutoConfiguration} 的类注释）。</p>
+ *
+ * <p><b>懒加载、无副作用</b>：只有被调用 {@link #getBaiduMapMCP()} 时才会真正建立连接。
+ * 因此不挂地图工具的模块（例如多 Agent 模式下的主管）拿到这个 Bean 也不会产生任何连接开销。</p>
  */
 @Slf4j
-@Component
 public class BaiduMapMCP {
 
     private static final String CLIENT_NAME = "BaiduMap-mcp";
@@ -57,7 +63,7 @@ public class BaiduMapMCP {
             log.error("""
 
                     ============================================================
-                    没有配置百度地图 MCP 地址，路线制定 Agent 将没有地图工具。
+                    没有配置百度地图 MCP 地址，该 Agent 将没有地图工具。
                     配置方式：
                       1) 打开 https://modelscope.cn/mcp ，搜索「百度地图」
                       2) 填入你在 https://lbs.baidu.com/apiconsole/center 申请的 API Key
