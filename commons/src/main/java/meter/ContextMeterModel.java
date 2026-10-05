@@ -56,9 +56,11 @@ public class ContextMeterModel implements Model {
         final long msgChars = sumMsgChars(messages);
         final int toolCount = tools == null ? 0 : tools.size();
         final long toolChars = sumToolChars(tools);
+        // 在 stream() 里就算好"最大消息"的构成提示（记录方法里拿不到 messages）
+        final String largestHint = largestMessageHint(messages);
 
         return delegate.stream(messages, tools, options)
-                .doOnNext(resp -> record(seq, msgCount, msgChars, toolCount, toolChars, resp));
+                .doOnNext(resp -> record(seq, msgCount, msgChars, toolCount, toolChars, largestHint, resp));
     }
 
     @Override
@@ -66,7 +68,8 @@ public class ContextMeterModel implements Model {
         return delegate.getModelName();
     }
 
-    private void record(long seq, int msgCount, long msgChars, int toolCount, long toolChars, ChatResponse resp) {
+    private void record(long seq, int msgCount, long msgChars, int toolCount, long toolChars,
+                        String largestHint, ChatResponse resp) {
 
         ChatUsage usage = resp == null ? null : resp.getUsage();
         // 流式响应只在最后一个分片带 usage，其余分片为 0 —— 只在有值时记录，保证一次调用只打一行
@@ -88,9 +91,9 @@ public class ContextMeterModel implements Model {
         int historyShare = 100 - schemaShare;
 
         log.info("[ContextMeter] {} call#{} 输入={} 输出={} | 消息={}条/{}字符 工具={}个/schema={}字符 "
-                        + "| 估算构成：schema≈{}%  系统+历史+工具结果≈{}%  | 进程累计输入={} 进程峰值输入={}",
+                        + "| 估算构成：schema≈{}%  系统+历史+工具结果≈{}%  | 进程累计输入={} 进程峰值输入={} | {}",
                 label, seq, in, out, msgCount, msgChars, toolCount, toolChars,
-                schemaShare, historyShare, inputSum.get(), maxInput.get());
+                schemaShare, historyShare, inputSum.get(), maxInput.get(), largestHint);
     }
 
     private static long sumMsgChars(List<Msg> messages) {
@@ -99,27 +102,68 @@ public class ContextMeterModel implements Model {
         }
         long sum = 0;
         for (Msg m : messages) {
-            if (m == null) {
-                continue;
-            }
-            try {
-                // ★ 必须遍历全部 content block，不能只用 getTextContent()：
-                //   工具结果是独立的内容块，getTextContent() 取不到 —— 实测表现为
-                //   「消息字符几乎不涨、但输入 token 涨了 4 倍」，正是工具结果在偷偷累积。
-                var blocks = m.getContent();
-                if (blocks == null) {
-                    continue;
-                }
-                for (var b : blocks) {
+            sum += msgChars(m);
+        }
+        return sum;
+    }
+
+    /**
+     * 统计一条消息的字符数：**文本内容 + metadata**。
+     *
+     * <p>★ 必须把 metadata 算进来。实测教训：工具结果（例如一条地图返回）并不总是放在文本内容块里，
+     * 它可能是 {@code Msg} 的**结构化数据**；只统计 content 时会出现
+     * "消息字符几乎不涨、但输入 token 涨了 4 倍"的假象，从而把归因做错。</p>
+     */
+    private static long msgChars(Msg m) {
+        if (m == null) {
+            return 0;
+        }
+        long sum = 0;
+        try {
+            if (m.getContent() != null) {
+                for (var b : m.getContent()) {
                     if (b != null) {
                         sum += String.valueOf(b).length();
                     }
                 }
-            } catch (Exception ignored) {
-                // 计量失败不能影响业务
             }
+            if (m.getMetadata() != null && !m.getMetadata().isEmpty()) {
+                sum += String.valueOf(m.getMetadata()).length();
+            }
+        } catch (Exception ignored) {
+            // 计量失败不能影响业务
         }
         return sum;
+    }
+
+    /** 给排查用：最大的一条消息有多大、以及它主要在 content 还是 metadata 里 */
+    private static String largestMessageHint(List<Msg> messages) {
+        if (messages == null || messages.isEmpty()) {
+            return "无";
+        }
+        Msg largest = null;
+        long max = -1;
+        for (Msg m : messages) {
+            long c = msgChars(m);
+            if (c > max) {
+                max = c;
+                largest = m;
+            }
+        }
+        if (largest == null) {
+            return "无";
+        }
+        long contentOnly = 0;
+        if (largest.getContent() != null) {
+            for (var b : largest.getContent()) {
+                if (b != null) {
+                    contentOnly += String.valueOf(b).length();
+                }
+            }
+        }
+        long metaOnly = largest.getMetadata() == null ? 0 : String.valueOf(largest.getMetadata()).length();
+        return "最大消息 role=%s 共%d字符（content %d + metadata %d）"
+                .formatted(largest.getRole(), max, contentOnly, metaOnly);
     }
 
     private static long sumToolChars(List<ToolSchema> tools) {

@@ -4,6 +4,7 @@ import config.AgentScopeProperties;
 import context.ArtifactStore;
 import context.ContextProperties;
 import context.ReadArtifactTool;
+import context.ToolRouter;
 import io.agentscope.core.ReActAgent;
 import io.agentscope.core.a2a.agent.card.AgentCardResolver;
 import io.agentscope.core.agent.Event;
@@ -126,6 +127,20 @@ public class ManagerAgent {
             - 不要把方案写在中间轮次、末尾只写「已完成 / 上方已给出」之类的收尾总结；
             - 不要在末尾附加「如需我再帮你生成 1 人版 / 导出表格」之类的后续服务建议；
             - 用户拿到的就是最后这一条消息，它必须能独立阅读、内容完整。
+            """;
+
+    /**
+     * 未挂载地图工具时追加到系统提示词后面的说明（机制 A 的配套）。
+     *
+     * <p><b>为什么必须跟着工具集改提示词：</b>工具没挂却仍要求模型去查真实路线，它只会浪费轮次
+     * 反复尝试不存在的工具，最后还可能编一个失败原因（这正是已知缺陷 D2 的形态）。</p>
+     */
+    private static final String NO_MAP_TOOLS_SUFFIX = """
+
+            【本次运行的特殊说明】
+            本次【没有】挂载地图工具，无法查询真实的路线、距离与耗时。
+            请基于通用地理常识给出方案，并【明确标注哪些数字是估算值】；
+            不要尝试调用不存在的地图工具，也不要因为拿不到地图数据就停止输出。
             """;
 
     private final io.agentscope.core.model.Model model;
@@ -273,30 +288,47 @@ public class ManagerAgent {
         //1. 工具包：地图 MCP 工具 + 计算工具
         ToolUtils toolUtils = new ToolUtils(commonsProperties.isToolParallel());
 
-        // ★ 上下文预算（机制 B）：把超长的地图返回「外置」，上下文里只留摘要 + id。
-        //   必须用装饰后的客户端注册，否则 toolkit 内部持有的是原始客户端，拦截不到。
-        ArtifactStore artifactStore = new ArtifactStore();
-        McpClientWrapper mcpClient = baiduMapMCP.initBaiduMapMCP();
-        if (offload && mcpClient != null) {
-            mcpClient = new OffloadingMcpClient(mcpClient, artifactStore,
-                    contextProperties.getOffloadThresholdChars(),
-                    contextProperties.getPreviewChars());
-            log.info("[ManagerAgent] 单 Agent 模式：工具结果外置已开启（阈值 {} 字符，预览 {} 字符）",
-                    contextProperties.getOffloadThresholdChars(), contextProperties.getPreviewChars());
+        // ★ 机制 A：按需挂载工具组。计量显示每次调用的固定开销（工具 Schema）约占首轮输入的 78%，
+        //   所以先用一次极小的模型调用判断本需求是否需要真实地图数据；不需要就不挂那 10 个地图工具。
+        boolean mountMap = true;
+        if (contextProperties.isToolGating()) {
+            mountMap = new ToolRouter(model, Duration.ofSeconds(30)).needsMapTools(trace.getPrompt());
         } else {
-            log.info("[ManagerAgent] 单 Agent 模式：工具结果外置【关闭】（基线组）");
+            log.info("[ManagerAgent] 单 Agent 模式：工具按需挂载【关闭】，挂载全部工具组");
         }
-        Toolkit toolkit = toolUtils.registerMcpClient(mcpClient);
+
+        ArtifactStore artifactStore = new ArtifactStore();
+        Toolkit toolkit;
+
+        if (mountMap) {
+            // 机制 B：把超长的地图返回「外置」，上下文里只留摘要 + id。
+            // 必须用装饰后的客户端注册，否则 toolkit 内部持有的是原始客户端，拦截不到。
+            McpClientWrapper mcpClient = baiduMapMCP.initBaiduMapMCP();
+            if (offload && mcpClient != null) {
+                mcpClient = new OffloadingMcpClient(mcpClient, artifactStore,
+                        contextProperties.getOffloadThresholdChars(),
+                        contextProperties.getPreviewChars());
+                log.info("[ManagerAgent] 单 Agent 模式：工具结果外置已开启（阈值 {} 字符，预览 {} 字符）",
+                        contextProperties.getOffloadThresholdChars(), contextProperties.getPreviewChars());
+            } else if (mcpClient != null) {
+                log.info("[ManagerAgent] 单 Agent 模式：工具结果外置【关闭】（基线组）");
+            }
+            toolkit = toolUtils.registerMcpClient(mcpClient);
+
+            // 与结果外置配套的「按需取回」工具：Agent 需要细节时自己去取，而不是让全部内容常驻上下文
+            if (offload) {
+                toolkit.registration()
+                        .tool(new ReadArtifactTool(artifactStore, contextProperties.getRetrieveChars()))
+                        .apply();
+            }
+        } else {
+            toolkit = ToolUtils.createToolkit(commonsProperties.isToolParallel());
+            log.info("[ManagerAgent] 按需挂载：本次需求不需要真实地图数据，已跳过地图工具组"
+                    + "（省下 10 个工具的 Schema）");
+        }
 
         // 计算工具（预算/油耗等），与行程子 Agent 用的是同一个类
         toolkit.registration().tool(new Calculate()).apply();
-
-        // 与结果外置配套的「按需取回」工具：Agent 需要细节时自己去取，而不是让全部内容常驻上下文
-        if (offload) {
-            toolkit.registration()
-                    .tool(new ReadArtifactTool(artifactStore, contextProperties.getRetrieveChars()))
-                    .apply();
-        }
 
         log.info("[ManagerAgent] 单 Agent 模式：已挂载 {} 个工具：{}（工具并行={}）",
                 toolkit.getToolNames().size(), toolkit.getToolNames(), commonsProperties.isToolParallel());
@@ -313,11 +345,12 @@ public class ManagerAgent {
         PlanNotebook planNotebook = new TripPlan(properties).getPlan();
 
         //4. 组装 Agent。名字带 Single 后缀，便于在 Langfuse 里区分两条臂的 trace
+        String sysPrompt = mountMap ? SINGLE_SYS_PROMPT : SINGLE_SYS_PROMPT + NO_MAP_TOOLS_SUFFIX;
         return AgentUtils.getReActAgentBuilder(
                         properties.getName() + "Single",
                         "单Agent基线：自己完成从路线到行程的全部规划（EXP-001 对照实验用）",
                         model,
-                        SINGLE_SYS_PROMPT)
+                        sysPrompt)
                 // 单 Agent 要独自完成子 Agent 们的工作，迭代上限给得更宽，
                 // 目的是让两条臂都【不会触顶】—— 触顶了比的就是预算而不是架构了
                 .maxIters(properties.getSingleMaxIters())

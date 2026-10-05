@@ -29,7 +29,7 @@
 10. **三个 JVM 必须限堆**（脚本默认 `-Xmx512m`）—— 不限堆会被 OOM Killer 干掉（`Exited (137)`）。
 11. **OTel 依赖必须含 `opentelemetry-reactor-3.1`，版本锁 `2.21.0-alpha`** —— 缺它第一次请求就 500（`NoClassDefFoundError`），极易误判成「Key 不对」。
 12. **OTLP 直连上报必须带 `x-langfuse-ingestion-version: 4`** —— 少了它数据最多延迟 15 分钟，表现为「跑完了但 Langfuse 里没有记录」。
-13. **重建顺序：先停、再打包、后启动**（`.\stop-all.ps1` → `mvn clean package` → `.\run-all.ps1 -SkipBuild`）。顺序反了 `clean` 会因 jar 被 JVM 锁住而失败；且 `run-all.ps1` **不会先停旧进程** —— 端口被占时它照样报 `[就绪]`，实际跑的是旧代码。
+13. **重建顺序：先停、再打包、后启动**（`.\stop-all.ps1` → `mvn clean package` → `.\run-all.ps1 -SkipBuild`）。顺序反了 `clean` 会因 jar 被 JVM 锁住而失败；且 `run-all.ps1` **不会先停旧进程** —— 端口被占时它照样报 `[就绪]`，实际跑的是旧代码。**构建失败时绝不能接着 `-SkipBuild` 启动** —— 那会用旧 jar 冒充新构建（实测踩过：一次编译错让整轮实验数据作废）。
 14. **`ReActAgent` 是 prototype Bean，按 A2A 会话懒创建** —— `已挂载的工具` 日志出现在**第一次请求之后**，别刚启动就搜日志判断 MCP 挂了。
 
 ## 常用命令

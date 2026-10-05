@@ -52,6 +52,14 @@ app:
       preview-chars: 800
       retrieve-chars: 4000
       meter-enabled: true
+      # 机制 A：按需挂载工具组（不需要真实地图数据的需求就不挂那 10 个地图工具）
+      tool-gating: true
+      # 机制 C：历史压缩（消息总字符超阈值时压缩较早的工具结果）
+      history-compaction: true
+      compact-threshold-chars: 30000
+      compact-keep-recent: 6
+      compact-head-chars: 500
+      compact-tail-chars: 500
     # ★ 三个超时的层次关系（必须遵守，否则超时提示会失真）：
     #   remote-call-timeout（主管 Agent 主动放弃单个子 Agent）
     #     < tool-execution-timeout（框架兜底，应更大）

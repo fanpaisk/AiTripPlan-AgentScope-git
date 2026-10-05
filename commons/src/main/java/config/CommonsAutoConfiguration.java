@@ -6,6 +6,7 @@ import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.model.OpenAIChatModel;
 import mcp.BaiduMapMCP;
+import meter.CompactingModel;
 import meter.ContextMeterModel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -103,11 +104,26 @@ public class CommonsAutoConfiguration {
 
         // ★ 上下文计量：装饰模型，每次 LLM 调用打印真实输入/输出 token 与上下文构成
         //   （工具 schema 占多少 / 系统+历史+工具结果占多少）。没有它就无法验证上下文优化是否生效。
+        Model result = built;
+
+        // ★ 机制 D：上下文计量（打印每次调用的真实 token 与构成）
         if (contextProperties.isMeterEnabled()) {
             log.info("[commons] 上下文计量已开启：每次调用会打印 [ContextMeter] 行");
-            return new ContextMeterModel(built, modelName);
+            result = new ContextMeterModel(result, modelName);
         }
-        return built;
+
+        // ★ 机制 C：历史压缩。刻意放在计量【里面】一层 ——
+        //   这样计量打印的是【真正发出去】的内容大小，而不是压缩前的。
+        if (contextProperties.isHistoryCompaction()) {
+            result = new CompactingModel(result,
+                    contextProperties.getCompactThresholdChars(),
+                    contextProperties.getCompactKeepRecent(),
+                    contextProperties.getCompactHeadChars(),
+                    contextProperties.getCompactTailChars());
+            log.info("[commons] 历史压缩已开启：消息总字符超 {} 时压缩较早的工具结果（保留最近 {} 条不动）",
+                    contextProperties.getCompactThresholdChars(), contextProperties.getCompactKeepRecent());
+        }
+        return result;
     }
 
     /**
