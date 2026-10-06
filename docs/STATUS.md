@@ -131,5 +131,9 @@
 | 三个 Spring 服务 | 8081 / 8082 / 8085 | 先 `.\stop-all.ps1`，再 `.\run-all.ps1`（`-SkipBuild` 跳打包，`-HeapMb 768` 调堆，`-Only manager\|route\|planner` 单起） |
 | Nacos 3.1.0 | Docker 容器 `nacos`；8848（RPC，代码连这个）/ 8088（控制台，账号密码均 `nacos`） | `docker start nacos` / `docker stop nacos` |
 | Langfuse Cloud（观测，现用） | EU：`https://cloud.langfuse.com`；OTLP 摄取 `/api/public/otel/v1/traces`；读取 `/api/public/v2/observations`、`/api/public/v2/metrics` | 无需本地进程 |
-| Langfuse 自托管（**备用**，D-014） | 编排文件在**开发机的兄弟目录**（形如 `<兄弟目录>\.langfuse\docker-compose.yml`），**不在本仓库内**；6 个容器，数据卷保留 | 2026-10-05 实测：起容器后约 15 秒内全部退出（web 143 / worker 137）。本机总内存 15.2 GB、**当时可用仅 2.0 GB**，不要在这台机器上指望它 |
+| Langfuse 自托管（**备用**，D-014） | 编排文件在**开发机的兄弟目录**（形如 `<兄弟目录>\.langfuse\docker-compose.yml`），**不在本仓库内**；6 个容器，数据卷保留 | ⚠️ **它们带 `restart: unless-stopped`：Docker 一启动就会自动把这 6 个容器拉起来**（2026-10-05 实测：Docker Desktop 启动后 6 个容器自动 Up），会与应用抢内存 —— 已 `docker stop`（保留"显式停止"状态，之后不再自动起）。历史上还出现过起容器后约 15 秒内全部退出（web 143 / worker 137） |
 | OTLP 接收器（排查用） | `tools\otlp-sink.ps1`（只统计字节数，默认 127.0.0.1:4318）；`tools\otlp-capture.ps1`（**保存报文**供 grep 属性名，默认 127.0.0.1:4319） | 用法与恢复步骤见 `DECISIONS.md` D-020 |
+
+> ⚠️ **本机内存非常紧张**：2026-10-05 实测总 15.2 GB，而 **Langfuse 自托管容器跑着时可用只剩 0.4 GB**，停掉后 0.9 GB。
+> 这正是 D-010 / D-011（三个 JVM 必须限堆、自托管降级为备用）的成因。**在这台机器上不要同时跑容器平台与应用**；
+> 若服务启动失败或注册不上，先 `Get-CimInstance Win32_OperatingSystem` 看一眼可用内存。
