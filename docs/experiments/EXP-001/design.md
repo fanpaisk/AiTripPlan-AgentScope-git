@@ -174,7 +174,7 @@
 
 - `docs/experiments/EXP-001/`：`design.md`（本文件）、`prompts.md`（两臂完整提示词）、`raw/*.json`、`results.csv`、`report.md`（结论 + 图表 + 局限性）
 - `docs/DECISIONS.md`：新增 EXP-001 的设计决策（请求级开关、交错执行等）与被否方案
-- `README.md`：新增一节面向读者的实验摘要（简历贴这一节）
+- `README.md`（现已精简为开源门面）与 `docs/手册-完整版.md`：面向读者的实验摘要
 - ⚠️ 原始回答入库前检查是否含百度 MCP 完整地址（已知缺陷 **D7**）
 
 ---
@@ -209,4 +209,4 @@
 4. 写 `tools/experiment-run.ps1`（门禁 + 跑批 + 采集 + 断点续跑）
 5. **冒烟轮**（P1 两臂各 1 次）→ 校准预算 → 定 n
 6. 全量跑批 → 盲评 → `report.md`
-7. 补 `DECISIONS.md` 与 `README.md` 摘要
+7. 补 `DECISIONS.md` 摘要与面向读者的实验摘要（README 已精简为开源门面；详情与实验数据在 `docs/手册-完整版.md` 与 `docs/experiments/`）

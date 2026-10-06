@@ -7,7 +7,7 @@
 ## 定位
 
 多 Agent 自主决策旅游规划：一句话 → 主管 Agent 用 PlanNotebook 拆任务 → 经 Nacos(A2A) 调度远程子 Agent（路线 / 行程）→ 调百度地图 MCP + Skills → 汇总成完整行程。
-基于慕课网课程项目补全（课程原代码 17 项缺陷已修，清单见 `README.md` 第八节），并做了工程化增强。
+基于慕课网课程项目补全（课程原代码 17 项缺陷已修，清单见 `docs/手册-完整版.md` 的「与课程原版代码的差异」一节），并做了工程化增强。
 
 栈：AgentScope 1.0.8 · Spring Boot 4.0.2 · Java 17（**不用 preview**）· Nacos 3.1.0
 模块：`commons`（无端口）/ `manager_agent`(8081) / `routeMaking_agent`(8082) / `tripPlanner_agent`(8085)

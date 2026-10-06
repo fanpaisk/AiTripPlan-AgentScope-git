@@ -40,7 +40,7 @@
 
 ## 二、已完成（已验收）
 
-- **代码补全**：课程原代码 17 项缺陷全部修复，逐条见 `README.md` 第八节。
+- **代码补全**：课程原代码 17 项缺陷全部修复，逐条见 `docs/手册-完整版.md` 的「与课程原版代码的差异」一节。
 - **模型层厂商中立**：`app.agentscope.llm.*` 三行配置换厂商（现用 DeepSeek 官方，OpenAI 兼容协议）。
 - **工具并行**：`tool-parallel: true` 已确认生效（日志 `[ToolUtils] 创建 Toolkit: parallel=true`），实测加速比 1.44x ~ 1.99x。
 - **应用内可观测**：`GET /api/runs/{runId}` 返回逐步轨迹与 `toolBatches` 并行度报告（工具耗时由 `RemoteAgentTool` 自报）。
